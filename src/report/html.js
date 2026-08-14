@@ -246,7 +246,9 @@ const STYLE = `
   .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin: 1rem 0; }
   .meta-item { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; }
   .meta-item .label { color: var(--muted); font-size: 0.78rem; }
-  .meta-item .value { font-size: 1.1rem; font-weight: 600; }
+  .meta-item .value { font-size: 1.1rem; font-weight: 600; overflow-wrap: anywhere; word-break: break-word; }
+  .meta-item.wide { grid-column: 1 / -1; }
+  .meta-item.wide .value { font-size: 0.95rem; }
   footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; }
   .cmp-metric { margin-bottom: 2rem; }
 `;
@@ -256,18 +258,18 @@ export function renderHtmlReport(reportData) {
   const metaItems = [
     ['Mode', modeLabel],
     ['Generated', reportData.generatedAt],
-    ['Scanned dir', reportData.claudeDir],
+    ['Scanned dir', reportData.claudeDir, true],
     ['Files scanned', fmtInt(reportData.scan.filesScanned)],
     ['New files', fmtInt(reportData.scan.newFiles)],
     ['Corrupt lines skipped', fmtInt(reportData.scan.corruptLineCount)],
     ['Deduped requests', fmtInt(reportData.totals.requests)],
   ];
-  if (reportData.mode === 'compare') metaItems.push(['Baseline ref', reportData.baselineRef]);
+  if (reportData.mode === 'compare') metaItems.push(['Baseline ref', reportData.baselineRef, true]);
 
   const body = `<div class="wrap">
   <h1>Claude Code usage ${esc(modeLabel.toLowerCase())} report</h1>
   <div class="meta-grid">
-    ${metaItems.map(([label, value]) => `<div class="meta-item"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`).join('')}
+    ${metaItems.map(([label, value, wide]) => `<div class="meta-item${wide ? ' wide' : ''}"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`).join('')}
   </div>
 
   ${reportData.comparison ? section('Compare vs baseline', comparisonSection(reportData.comparison)) : ''}
