@@ -1,0 +1,14 @@
+{
+  "name": "claude-usage-baseliner",
+  "version": "0.1.0",
+  "description": "Baselines Claude Code token usage from local ~/.claude transcripts and measures efficiency change over time.",
+  "type": "module",
+  "bin": {
+    "claude-usage-baseliner": "./bin/claude-usage-baseliner.js"
+  },
+  "engines": {
+    "node": ">=18.11"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
