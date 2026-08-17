@@ -35,7 +35,9 @@ export function extractCompactionEvent(obj) {
   };
 }
 
-const TRACKED_TOOLS = new Set(['Read', 'Bash', 'Grep', 'Edit', 'Write', 'Glob', 'Task']);
+// LSP is tracked because documentSymbol-first navigation is a deliberate token-reduction
+// measure — leaving it out made the very tool the guidance promotes invisible to the baseline.
+const TRACKED_TOOLS = new Set(['Read', 'Bash', 'Grep', 'Edit', 'Write', 'Glob', 'Task', 'LSP']);
 
 // Stateful within a single file (tool_use ids are only meaningful inside one transcript). Call
 // .observe(obj) for every parsed line, then .flush() once per file to get { toolName -> stats }.
