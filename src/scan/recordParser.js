@@ -44,6 +44,13 @@ export function parseLine(rawLine, context) {
       inputTokens: usage.input_tokens ?? 0,
       outputTokens: usage.output_tokens ?? 0,
       cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
+      // Cache writes are billed by TTL: 1.25x the input rate at 5 minutes, 2x at 1 hour. The
+      // aggregate cache_creation_input_tokens above hides that split, so costing it as all-5m
+      // understates spend (measurably: ~2.5% on this corpus, where ~13% of cache writes are 1h).
+      // Null when the API did not report a breakdown, which the cost model treats as "unknown"
+      // rather than "zero" so it can fall back to the flat multiplier instead of under-billing.
+      cacheCreation5mTokens: usage.cache_creation?.ephemeral_5m_input_tokens ?? null,
+      cacheCreation1hTokens: usage.cache_creation?.ephemeral_1h_input_tokens ?? null,
       cacheReadTokens: usage.cache_read_input_tokens ?? 0,
       serviceTier: usage.service_tier ?? null,
       speed: usage.speed ?? null,

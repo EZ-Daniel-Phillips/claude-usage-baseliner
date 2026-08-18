@@ -14,8 +14,14 @@ export const PRICE_TABLE_VERSION = '2026-06-24';
 
 // USD per 1,000,000 tokens, published Claude API list rates.
 // Cache multipliers are relative to the model's own input rate.
-const CACHE_WRITE_MULTIPLIER = 1.25; // 5-minute TTL. 1h TTL is 2x, but transcripts don't break it out.
+const CACHE_WRITE_5M_MULTIPLIER = 1.25;
+const CACHE_WRITE_1H_MULTIPLIER = 2.0;
 const CACHE_READ_MULTIPLIER = 0.1;
+
+// Fallback when a token bundle carries no TTL breakdown (older scans, or a window where the API did
+// not report one). Deliberately the 5m rate rather than a blended guess: an assumed blend would bake
+// an unverifiable number into the headline, whereas this understates by a known, disclosable amount.
+const CACHE_WRITE_FALLBACK_MULTIPLIER = CACHE_WRITE_5M_MULTIPLIER;
 
 const PRICES = {
   'claude-fable-5': { input: 10, output: 50 },
@@ -52,27 +58,62 @@ export function isPricedModel(model) {
   return priceFor(model) !== null;
 }
 
+// True when this bundle can be billed at exact cache-write TTL rates.
+export function hasTtlSplit(tokens) {
+  return (
+    tokens &&
+    typeof tokens.cacheCreation5mTokens === 'number' &&
+    typeof tokens.cacheCreation1hTokens === 'number'
+  );
+}
+
+// True only when EVERY row of a byModel-shaped array carries a TTL split. Used to decide whether a
+// comparison may price exactly: mixing exact and fallback pricing across the two sides of a compare
+// would show up as a cost change that is really just a change in metering.
+export function byModelHasTtlSplit(byModel) {
+  return Array.isArray(byModel) && byModel.length > 0 && byModel.every((row) => hasTtlSplit(row.tokens));
+}
+
 // Estimated USD for one bundle of token-class counts attributed to a single model.
-export function estimateCost(model, tokens) {
+//
+// `ttlMode` controls cache-write billing:
+//   'exact' - bill 5m and 1h cache writes at their own rates when the split is present
+//   'flat'  - always use the fallback multiplier, even if a split is available
+// Callers comparing two windows must pass the SAME mode for both sides.
+export function estimateCost(model, tokens, { ttlMode = 'exact' } = {}) {
   const price = priceFor(model) ?? FALLBACK_PRICE;
   const inRate = price.input / 1e6;
   const outRate = price.output / 1e6;
+
+  const cacheWriteCost =
+    ttlMode === 'exact' && hasTtlSplit(tokens)
+      ? tokens.cacheCreation5mTokens * inRate * CACHE_WRITE_5M_MULTIPLIER +
+        tokens.cacheCreation1hTokens * inRate * CACHE_WRITE_1H_MULTIPLIER
+      : tokens.cacheCreationTokens * inRate * CACHE_WRITE_FALLBACK_MULTIPLIER;
+
   return (
     tokens.inputTokens * inRate +
     tokens.outputTokens * outRate +
-    tokens.cacheCreationTokens * inRate * CACHE_WRITE_MULTIPLIER +
+    cacheWriteCost +
     tokens.cacheReadTokens * inRate * CACHE_READ_MULTIPLIER
   );
 }
 
 // Total estimated USD across a byModel-shaped array ([{ key, requests, tokens }]). Also reports how
 // much of the spend had to fall back to an assumed price, so the HTML can disclose it.
-export function estimateCostByModel(byModel) {
+export function estimateCostByModel(byModel, { ttlMode = 'exact' } = {}) {
+  // Resolve the EFFECTIVE mode up front. Requesting 'exact' against data that carries no TTL split
+  // must degrade to 'flat' here, not silently per-row: downstream consumers (the decomposition in
+  // particular) pick their token classes from the reported mode, and would otherwise read
+  // 5m/1h fields that do not exist.
+  const splitAvailable = byModelHasTtlSplit(byModel);
+  const effectiveTtlMode = ttlMode === 'exact' && splitAvailable ? 'exact' : 'flat';
+
   let total = 0;
   let unpricedRequests = 0;
   const perModel = [];
   for (const row of byModel) {
-    const cost = estimateCost(row.key, row.tokens);
+    const cost = estimateCost(row.key, row.tokens, { ttlMode: effectiveTtlMode });
     const priced = isPricedModel(row.key);
     if (!priced) unpricedRequests += row.requests;
     total += cost;
@@ -87,7 +128,7 @@ export function estimateCostByModel(byModel) {
     });
   }
   perModel.sort((a, b) => b.cost - a.cost);
-  return { total, perModel, unpricedRequests };
+  return { total, perModel, unpricedRequests, ttlMode: effectiveTtlMode, ttlSplitAvailable: splitAvailable };
 }
 
 // "Context tokens" = everything Claude had to re-read to answer, regardless of how it was billed.
@@ -126,7 +167,9 @@ export function mixAdjustedCostPerRequest(baselinePerModel, comparePerModel) {
 }
 
 export const COST_MODEL_NOTES = {
-  cacheWriteMultiplier: CACHE_WRITE_MULTIPLIER,
+  cacheWrite5mMultiplier: CACHE_WRITE_5M_MULTIPLIER,
+  cacheWrite1hMultiplier: CACHE_WRITE_1H_MULTIPLIER,
+  cacheWriteFallbackMultiplier: CACHE_WRITE_FALLBACK_MULTIPLIER,
   cacheReadMultiplier: CACHE_READ_MULTIPLIER,
   priceTableVersion: PRICE_TABLE_VERSION,
 };
