@@ -291,13 +291,30 @@ export function modelMixShift(basePerModel, compPerModel) {
   return { tvdPoints: (tvd / 2) * 100, rows };
 }
 
-function significanceEnglish(mw) {
+// `cmpDist` is a compareDistributions() result, not just the test: the test runs on a bounded random
+// sample of each side, and quoting that sample size as if it were the request count reads as though
+// the baseline only ever had 5,000 requests. State both, and say which is which.
+function significanceEnglish(cmpDist) {
+  const mw = cmpDist?.mannWhitney;
   if (!mw) return null;
+
+  const trueBase = cmpDist.baseline?.n ?? null;
+  const trueComp = cmpDist.compare?.n ?? null;
+  const sampled = Boolean(cmpDist.baseline?.sampled || cmpDist.compare?.sampled);
+  // A skipped test may omit its counts entirely, so guard undefined and NaN as well as null.
+  const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString('en-US') : 'an unknown number of');
+
+  // How the two sides were fed to the test, phrased so a sample is never mistaken for a total.
+  const basis = sampled
+    ? `${n(mw.n1)} of your ${n(trueBase)} baseline requests against ${n(mw.n2)} of ${n(trueComp)} new ones, each side a random sample drawn to keep the stored report a sensible size`
+    : `all ${n(trueBase)} baseline requests against all ${n(trueComp)} new ones`;
+
   if (mw.skipped) {
     return {
       status: 'warn',
       short: 'Not enough data to be sure',
       text: `There were too few requests on one side to run a proper test (${mw.reason}). Treat the direction as a hint, not a result - collect more activity before drawing a conclusion.`,
+      basis,
     };
   }
   if (mw.pValue < 0.05) {
@@ -316,13 +333,17 @@ function significanceEnglish(mw) {
     return {
       status: 'good',
       short: 'Real change, not noise',
-      text: `Comparing ${mw.n1.toLocaleString('en-US')} baseline requests against ${mw.n2.toLocaleString('en-US')} new ones, this is ${strength} that is very unlikely to be normal day-to-day variation - ${odds}.`,
+      text: `Comparing ${basis}, this is ${strength} that is very unlikely to be normal day-to-day variation - ${odds}.`,
+      basis,
+      sampled,
     };
   }
   return {
     status: 'warn',
     short: 'Could still be normal variation',
-    text: `The difference is within the range you would expect from ordinary week-to-week variation (${mw.n1.toLocaleString('en-US')} vs ${mw.n2.toLocaleString('en-US')} requests). Do not bank this one yet.`,
+    text: `The difference is within the range you would expect from ordinary week-to-week variation, comparing ${basis}. Do not bank this one yet.`,
+    basis,
+    sampled,
   };
 }
 
@@ -533,7 +554,7 @@ export function buildInsights({
     });
   }
 
-  const significance = significanceEnglish(comparison?.distributions?.tokensPerRequest?.mannWhitney);
+  const significance = significanceEnglish(comparison?.distributions?.tokensPerRequest);
 
   return {
     findings,

@@ -394,10 +394,15 @@ function distributionSection(reportData) {
   const series = [];
   if (cmp) {
     const baseDist = cmp.distributions.tokensPerRequest.baseline;
-    if (baseDist.sample?.length) series.push({ label: 'Baseline', values: baseDist.sample, colorVar: 'series-1' });
+    if (baseDist.sample?.length) series.push({ label: 'Baseline', values: baseDist.sample, colorVar: 'series-1', totalN: baseDist.n });
   }
   if (compareDist.sample?.length) {
-    series.push({ label: cmp ? 'After changes' : 'All requests', values: compareDist.sample, colorVar: cmp ? 'series-2' : 'series-1' });
+    series.push({
+      label: cmp ? 'After changes' : 'All requests',
+      values: compareDist.sample,
+      colorVar: cmp ? 'series-2' : 'series-1',
+      totalN: compareDist.n,
+    });
   }
 
   const chart = distributionChart(series);
@@ -692,6 +697,11 @@ function methodExplainer(reportData) {
         : `<p class="callout callout-ok"><strong>Cache writes are costed exactly.</strong> Both sides of this comparison record the 5-minute/1-hour split, so 1-hour cache writes are billed at ${m.cacheWrite1hMultiplier}&times; rather than assumed to be the cheaper 5-minute kind.</p>`
     }
     <p class="callout callout-warn"><strong>This is an estimate, not your bill.</strong> Claude Code transcripts contain no billing signal, and on a subscription plan you are not charged per token at all. Treat the dollar figures as a consistently-weighted way to compare two periods against each other, not as an amount anybody invoiced you.${reportData.cost.unpricedRequests ? ` ${fmtInt(reportData.cost.unpricedRequests)} request(s) ran on a model with no entry in the price table and were costed at the Opus tier.` : ''}</p>
+
+    <h3>Which numbers are exact, and which use a sample</h3>
+    <p>A period can hold hundreds of thousands of requests, and storing every value in every report would make these files unusable. So each distribution keeps a <strong>random sample of up to 5,000 values</strong> alongside its statistics.</p>
+    <p><strong>Exact, computed from every single request:</strong> all totals, costs, averages, the median and every percentile, and the confidence intervals. Nothing on this page that carries a number is estimated from the sample.</p>
+    <p><strong>Drawn from the sample:</strong> the shape of the distribution curve, and the significance test. The sample is drawn at random, so it is representative &mdash; but where a figure comes from it, the report says so rather than quoting the sample size as if it were the request count.</p>
 
     <h3>What &ldquo;statistically significant&rdquo; means here</h3>
     <p>Any two periods will differ a bit by luck. The report runs a Mann-Whitney U test, which asks: if nothing had really changed, how often would a difference this large turn up anyway? Below a 1-in-20 chance, the result is called real. Below 10 samples on either side the test is skipped entirely and only a direction is reported &mdash; never treat that as a result.</p>
