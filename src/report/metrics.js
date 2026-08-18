@@ -140,6 +140,7 @@ export function buildReportData({
   scanResult,
   baselineReportData = null,
   baselineRef = null,
+  window = null,
   minN = 10,
   bootstrapSamples = 1500,
 }) {
@@ -229,11 +230,16 @@ export function buildReportData({
     generatedAt: scanResult.generatedAt,
     claudeDir,
     baselineRef,
+    // Which period this report actually covers. Previously unrecorded, which made it impossible to
+    // tell from a stored report what window its numbers described.
+    window,
     scan: {
       filesScanned: scanResult.filesScanned,
       newFiles: scanResult.newFiles,
       corruptLineCount: scanResult.corruptLineCount,
       boundaryReconciliations: scanResult.boundaryReconciliations,
+      outOfWindowLines: scanResult.outOfWindowLines ?? 0,
+      undatedLinesSkipped: scanResult.undatedLinesSkipped ?? 0,
     },
     totals: { requests: records.length, tokens: totals, tokenShare: tokenShare(totals) },
     cost: { ...estimateCostByModel(byModel), model: COST_MODEL_NOTES },

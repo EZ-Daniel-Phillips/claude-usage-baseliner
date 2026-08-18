@@ -58,7 +58,9 @@ export class ToolPayloadTracker {
     if (isError) s.errors += 1;
   }
 
-  observe(obj) {
+  // `inWindow` gates COUNTING only. Pending tool_use ids are always recorded, so a call issued just
+  // before a window boundary still pairs with its result just after it.
+  observe(obj, inWindow = true) {
     const content = obj?.message?.content;
     if (Array.isArray(content)) {
       for (const block of content) {
@@ -82,7 +84,7 @@ export class ToolPayloadTracker {
             : Array.isArray(payload)
               ? payload.reduce((acc, p) => acc + (typeof p?.text === 'string' ? p.text.length : 0), 0)
               : 0;
-        this._bump(name, bytes, block.is_error === true);
+        if (inWindow) this._bump(name, bytes, block.is_error === true);
         this.pending.delete(block.tool_use_id);
       }
     }

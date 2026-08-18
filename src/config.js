@@ -10,6 +10,7 @@ export function resolveConfig(parsed) {
     bootstrapSamples: parsed.values['bootstrap-samples']
       ? parseInt(parsed.values['bootstrap-samples'], 10)
       : DEFAULT_BOOTSTRAP_SAMPLES,
+    sinceLast: Boolean(parsed.values['since-last']),
     quiet: Boolean(parsed.values.quiet),
     verbose: Boolean(parsed.values.verbose),
   };

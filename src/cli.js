@@ -16,7 +16,10 @@ Usage:
 
 Options:
   --baseline              Scan everything available and establish a fresh reference point.
-  --compare               Scan only activity since the last baseline and compare against it.
+  --compare               Measure all activity since the last baseline and compare against it.
+  --since-last            With --compare, measure only what is new since the previous scan instead
+                          of everything since the baseline. Consumes that window: the next run will
+                          not see it again.
   --claude-dir <path>     Directory to scan (default: ~/.claude).
   --min-n <int>           Minimum sample size per side before running significance tests (default: 10).
   --bootstrap-samples <n> Resample count for percentile bootstrap CIs (default: 1500).
@@ -33,6 +36,7 @@ export async function main(argv) {
       options: {
         baseline: { type: 'boolean' },
         compare: { type: 'boolean' },
+        'since-last': { type: 'boolean' },
         'claude-dir': { type: 'string' },
         'min-n': { type: 'string' },
         'bootstrap-samples': { type: 'string' },
