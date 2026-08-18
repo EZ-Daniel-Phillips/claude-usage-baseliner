@@ -17,7 +17,12 @@ const RING_BUFFER_SIZE = 20;
 
 // Scans the whole transcript corpus under claudeDir, resuming per-file from `priorCursors` where
 // present (see state/cursor.js for the cursor shape). Pass `priorCursors = {}` for a fresh --baseline.
-export async function scanCorpus(claudeDir, priorCursors = {}) {
+//
+// `sinceMs` (epoch ms, or null) windows the scan by CONTENT time rather than by read position: only
+// activity stamped after it is collected. This is what lets --compare mean "everything since the
+// baseline" and stay repeatable - a byte-offset cursor answers "what have I not read yet", which is
+// a different question and consumes its own window on every run.
+export async function scanCorpus(claudeDir, priorCursors = {}, { sinceMs = null } = {}) {
   const deduper = new Deduper();
   const skillInvocations = [];
   const nestedMemoryEvents = [];
@@ -29,6 +34,8 @@ export async function scanCorpus(claudeDir, priorCursors = {}) {
   let newFiles = 0;
   let corruptLineCount = 0;
   let boundaryReconciliations = 0;
+  let outOfWindowLines = 0;
+  let undatedLinesSkipped = 0;
 
   for (const fileDesc of walkTranscriptFiles(claudeDir)) {
     let stat;
@@ -85,18 +92,37 @@ export async function scanCorpus(claudeDir, priorCursors = {}) {
       offsetAfterLastGoodLine = offsetAfter;
       obj = parsed.obj;
 
-      if (obj) {
-        toolTracker.observe(obj);
-        for (const skill of extractSkillInvocations(obj)) {
-          skillInvocations.push({ sessionId: fileDesc.sessionId, project: fileDesc.project, ...skill });
+      // Is this line inside the requested time window? Undated lines cannot be attributed to a
+      // period, so they are excluded (and counted) rather than silently credited to this one.
+      let inWindow = true;
+      if (sinceMs !== null && obj) {
+        const ts = obj.timestamp ? Date.parse(obj.timestamp) : NaN;
+        if (Number.isNaN(ts)) {
+          inWindow = false;
+          undatedLinesSkipped += 1;
+        } else if (ts <= sinceMs) {
+          inWindow = false;
+          outOfWindowLines += 1;
         }
-        const nm = extractNestedMemory(obj);
-        if (nm) nestedMemoryEvents.push({ sessionId: fileDesc.sessionId, project: fileDesc.project, ...nm });
-        const compaction = extractCompactionEvent(obj);
-        if (compaction) compactionEvents.push({ sessionId: fileDesc.sessionId, project: fileDesc.project, ...compaction });
+      }
+
+      if (obj) {
+        // Always observed, so a tool_use is still paired with its tool_result across the window
+        // boundary; only in-window results are counted.
+        toolTracker.observe(obj, inWindow);
+        if (inWindow) {
+          for (const skill of extractSkillInvocations(obj)) {
+            skillInvocations.push({ sessionId: fileDesc.sessionId, project: fileDesc.project, ...skill });
+          }
+          const nm = extractNestedMemory(obj);
+          if (nm) nestedMemoryEvents.push({ sessionId: fileDesc.sessionId, project: fileDesc.project, ...nm });
+          const compaction = extractCompactionEvent(obj);
+          if (compaction) compactionEvents.push({ sessionId: fileDesc.sessionId, project: fileDesc.project, ...compaction });
+        }
       }
 
       if (parsed.kind !== 'record') continue;
+      if (!inWindow) continue;
 
       const { record } = parsed;
 
@@ -143,6 +169,9 @@ export async function scanCorpus(claudeDir, priorCursors = {}) {
     newFiles,
     corruptLineCount,
     boundaryReconciliations,
+    outOfWindowLines,
+    undatedLinesSkipped,
+    sinceMs,
     records: deduper.values(),
     skillInvocations,
     nestedMemoryEvents,

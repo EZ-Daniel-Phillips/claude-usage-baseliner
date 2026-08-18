@@ -11,9 +11,20 @@ node bin/claude-usage-baseliner.js --compare  [--claude-dir <path>]
 ```
 
 `--baseline` scans everything currently available under the target `.claude` directory (default:
-`~/.claude`) and establishes a fresh reference point. `--compare` scans only the activity since the
-last scan and statistically compares it against the last `--baseline` (never a previous `--compare` -
-the reference distribution only moves when you explicitly re-baseline).
+`~/.claude`) and establishes a fresh reference point.
+
+`--compare` measures **all activity since that baseline** and compares it against it. It is
+repeatable: run it twice in a row and you get the same answer, and the request count only grows as
+you do more work. The reference distribution is always the last explicit `--baseline`, never a
+previous `--compare`, so the yardstick only moves when you deliberately move it.
+
+`--compare --since-last` answers the narrower question "what happened since I last looked". That
+window is **consumed** by reading it - the next run starts from where this one stopped - so it is
+opt-in rather than the default. Prefer plain `--compare` for "how am I doing against my baseline?".
+
+A cumulative compare reads the whole corpus and filters by timestamp, so it depends on no stored
+cursor state and works against a baseline taken at any time. On a corpus of ~1,400 transcript files
+that takes roughly 20 seconds.
 
 All output - the scan state, and every baseline/compare JSON+HTML report pair - is written under
 `~/.claude/claude-usage-baseliner/`, independent of where this repo lives, so it survives across
@@ -26,7 +37,8 @@ clones/reinstalls of this tool.
   compares/compare-<timestamp>.json + .html
 ```
 
-See `--help` for all options (`--min-n`, `--bootstrap-samples`, `--quiet`, `--verbose`).
+See `--help` for all options (`--since-last`, `--min-n`, `--bootstrap-samples`, `--quiet`,
+`--verbose`).
 
 ## Reading the report
 
@@ -96,3 +108,7 @@ metering. Re-run `--baseline` to start pricing exactly.
 - The stored JSON has no per-day breakdown, so the report compares two periods as blocks rather than
   plotting a trend over time. Adding a daily series to the scan output is what a time-series view
   would need.
+- Every report records the period it covers (`window.start` / `window.end` / `window.mode`) and shows
+  it at the top, so a stored report can always be read back without guessing what it measured.
+- Lines carrying no timestamp cannot be attributed to a period and are excluded from a cumulative
+  compare rather than silently credited to it; the count is disclosed in the report footer.
