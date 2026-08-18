@@ -1,6 +1,8 @@
 import { buildDistributionSummary } from '../stats/distribution.js';
 import { compareDistributions } from '../stats/compare.js';
 import { tokensPerRequest, tokensPerSession, tokensPerActiveHour } from '../stats/rates.js';
+import { estimateCostByModel, COST_MODEL_NOTES } from './cost.js';
+import { perRequestProfile, decomposeCostChange, buildInsights } from './insights.js';
 
 const TIERS = ['main', 'subagent', 'workflow-agent'];
 
@@ -160,9 +162,37 @@ export function buildReportData({
         { minN }
       ),
     };
+    // The baseline's own report JSON already carries everything needed to re-derive its cost profile
+    // (totals + byModel), so a compare can be enriched against a baseline captured by an older
+    // version of this tool without rescanning or re-baselining.
+    const baselineProfile = perRequestProfile(
+      baselineReportData.totals.tokens,
+      baselineReportData.totals.requests,
+      baselineReportData.byModel
+    );
+    const compareProfile = perRequestProfile(totals, records.length, byModel);
+
+    // The decomposition is computed first so the insight text can be like-for-like aware: an
+    // aggregate metric and its per-model equivalent can point in opposite directions when the
+    // workload moves between models, and the report must report that rather than pick a side.
+    const decomposition = decomposeCostChange(baselineProfile, compareProfile);
+
     comparison = {
       distributions: comparisonDistributions,
       headlineVerdict: comparisonDistributions.tokensPerRequest.verdict,
+      baselineProfile,
+      compareProfile,
+      decomposition,
+      insights: buildInsights({
+        base: baselineProfile,
+        comp: compareProfile,
+        comparison: { distributions: comparisonDistributions },
+        decomposition,
+        baseCompaction: baselineReportData.compaction,
+        compCompaction: buildCompactionSummary(scanResult.compactionEvents),
+        baseToolPayload: baselineReportData.toolPayload,
+        compToolPayload: buildToolPayloadTable(scanResult.toolPayloadStats),
+      }),
     };
   }
 
@@ -179,6 +209,8 @@ export function buildReportData({
       boundaryReconciliations: scanResult.boundaryReconciliations,
     },
     totals: { requests: records.length, tokens: totals, tokenShare: tokenShare(totals) },
+    cost: { ...estimateCostByModel(byModel), model: COST_MODEL_NOTES },
+    profile: perRequestProfile(totals, records.length, byModel),
     byTier,
     byAgentType,
     byModel,

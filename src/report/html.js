@@ -1,6 +1,12 @@
 // Renders a single self-contained HTML report (no CDN deps, no external fonts, no <script> tags -
-// collapsible sections use native <details>/<summary> - so the file is safe to double-click open
-// offline on any machine). Used for both --baseline and --compare reports.
+// collapsible sections use native <details>/<summary>, charts are server-rendered inline SVG - so the
+// file is safe to double-click open offline on any machine). Used for both --baseline and --compare.
+//
+// Reading order is deliberate and top-down: the verdict first, then what changed and what that means,
+// then where the change came from, then the evidence, then the raw tables. A reader who stops after
+// the first screen should still have the correct answer.
+
+import { distributionChart, beforeAfterBars, stackedShareBar, horizontalBars, waterfallChart, fmtCompact } from './charts.js';
 
 function esc(str) {
   if (str === null || str === undefined) return '';
@@ -17,10 +23,37 @@ function fmtNum(n, digits = 1) {
   return n.toLocaleString('en-US', { maximumFractionDigits: digits, minimumFractionDigits: 0 });
 }
 
+// A share that rounds to 0% but isn't actually zero reads as "none at all", which is wrong. Show it
+// as a below-threshold value instead.
+function fmtShare(n, digits = 1) {
+  if (n === null || n === undefined || Number.isNaN(n)) return 'n/a';
+  if (n === 0) return '0%';
+  const floor = 1 / 10 ** digits;
+  if (n < floor) return `&lt;${floor}%`;
+  return `${fmtNum(n, digits)}%`;
+}
+
 function fmtPct(n, digits = 1) {
   if (n === null || n === undefined || Number.isNaN(n)) return 'n/a';
   const sign = n > 0 ? '+' : '';
   return `${sign}${n.toFixed(digits)}%`;
+}
+
+function usd(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return 'n/a';
+  if (Math.abs(n) < 1) return `$${n.toFixed(4)}`;
+  if (Math.abs(n) < 1000) return `$${n.toFixed(2)}`;
+  return `$${Math.round(n).toLocaleString('en-US')}`;
+}
+
+// ISO timestamps are precise but unreadable at a glance; show a human date and keep the exact
+// value available on hover.
+function fmtWhen(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return esc(iso);
+  const date = d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+  return `<span title="${esc(iso)}">${esc(date)}, ${esc(time)}</span>`;
 }
 
 function badge(text, kind = 'default') {
@@ -28,50 +61,367 @@ function badge(text, kind = 'default') {
 }
 
 function lowConfBadge(isLow) {
-  return isLow ? badge('low-confidence (n<20)', 'warn') : '';
+  return isLow ? badge('low confidence (fewer than 20 samples)', 'warn') : '';
 }
 
-function section(title, bodyHtml, { id } = {}) {
+function section(title, bodyHtml, { id, lede } = {}) {
   return `<section${id ? ` id="${esc(id)}"` : ''}>
   <h2>${esc(title)}</h2>
+  ${lede ? `<p class="lede">${lede}</p>` : ''}
   ${bodyHtml}
 </section>`;
 }
 
-function tokenClassBreakdownTable(tokens, share) {
-  const rows = [
-    ['Input', tokens.inputTokens, share.input],
-    ['Output', tokens.outputTokens, share.output],
-    ['Cache create', tokens.cacheCreationTokens, share.cacheCreation],
-    ['Cache read', tokens.cacheReadTokens, share.cacheRead],
+// Status is never carried by colour alone - every status pairs a glyph and a word with the hue.
+const STATUS_GLYPH = { good: '&#9660;', bad: '&#9650;', warn: '&#9679;', neutral: '&#9679;' };
+const STATUS_WORD = { good: 'Improved', bad: 'Worse', warn: 'Watch', neutral: 'Flat' };
+
+// ---------------------------------------------------------------------------
+// Verdict
+// ---------------------------------------------------------------------------
+
+function verdictSection(reportData) {
+  const cmp = reportData.comparison;
+  const ins = cmp.insights;
+  const d = ins.deltas.costDelta;
+  const sig = ins.significance;
+
+  const direction = d === null ? 'neutral' : Math.abs(d) < 2 ? 'neutral' : d < 0 ? 'good' : 'bad';
+  const heroText = d === null ? 'n/a' : `${d > 0 ? '+' : ''}${d.toFixed(1)}%`;
+  const heroCaption =
+    d === null
+      ? 'Not enough data to judge.'
+      : d < -2
+        ? 'cheaper per request than your baseline'
+        : d > 2
+          ? 'more expensive per request than your baseline'
+          : 'essentially unchanged versus your baseline';
+
+  const answer =
+    d === null
+      ? 'There is not enough new activity yet to answer this.'
+      : d < -2
+        ? `<strong>Yes.</strong> Since your baseline, the same unit of work costs measurably less.`
+        : d > 2
+          ? `<strong>No.</strong> Since your baseline, the same unit of work costs measurably more.`
+          : `<strong>No measurable change.</strong> Cost per request is within a couple of percent of your baseline.`;
+
+  return `<div class="verdict verdict-${direction}">
+    <div class="verdict-hero">
+      <div class="hero-number">${esc(heroText)}</div>
+      <div class="hero-caption">${esc(heroCaption)}</div>
+    </div>
+    <div class="verdict-body">
+      <p class="verdict-answer">${answer}</p>
+      <p>Cost per request went from <strong>${esc(usd(cmp.baselineProfile.costPerRequest))}</strong> at baseline to
+         <strong>${esc(usd(cmp.compareProfile.costPerRequest))}</strong> across
+         ${esc(fmtInt(cmp.compareProfile.requests))} new requests.</p>
+      ${
+        sig
+          ? `<p class="sig sig-${sig.status}"><strong>${esc(sig.short)}.</strong> ${esc(sig.text)}</p>`
+          : ''
+      }
+    </div>
+  </div>`;
+}
+
+function findingsSection(findings) {
+  if (!findings.length) return '<p class="muted">No individual metric moved enough to call out.</p>';
+  return `<ul class="findings">
+    ${findings
+      .map(
+        (f) => `<li class="finding finding-${f.status}">
+      <div class="finding-head"><span class="finding-glyph">${STATUS_GLYPH[f.status]}</span><span class="finding-tag">${esc(STATUS_WORD[f.status])}</span><span class="finding-title">${esc(f.title)}</span></div>
+      <p class="finding-meaning">${esc(f.meaning)}</p>
+    </li>`
+      )
+      .join('')}
+  </ul>`;
+}
+
+// ---------------------------------------------------------------------------
+// KPIs
+// ---------------------------------------------------------------------------
+
+function kpiSection(kpis) {
+  const cards = kpis
+    .map(
+      (k) => `<div class="kpi kpi-${k.status}">
+      <div class="kpi-label">${esc(k.label)}</div>
+      <div class="kpi-values">
+        <span class="kpi-before">${esc(k.baselineText)}</span>
+        <span class="kpi-arrow">&rarr;</span>
+        <span class="kpi-after">${esc(k.compareText)}</span>
+      </div>
+      <div class="kpi-delta kpi-delta-${k.status}">${STATUS_GLYPH[k.status]} ${esc(fmtPct(k.pctChange))} <span class="kpi-word">${esc(STATUS_WORD[k.status])}</span></div>
+      <p class="kpi-meaning">${esc(k.meaning)}</p>
+    </div>`
+    )
+    .join('');
+
+  const chart = beforeAfterBars(
+    kpis.map((k) => ({
+      label: k.label,
+      baseline: k.baseline,
+      compare: k.compare,
+      baselineText: k.baselineText,
+      compareText: k.compareText,
+      lowerIsBetter: k.lowerIsBetter,
+    }))
+  );
+
+  return `${chart}<div class="kpi-grid">${cards}</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Decomposition
+// ---------------------------------------------------------------------------
+
+function decompositionSection(decomp) {
+  if (!decomp) return '';
+  const chart = waterfallChart(
+    decomp.start,
+    decomp.steps.map((s) => ({ label: s.label, value: s.value })),
+    decomp.end
+  );
+  const rows = decomp.steps
+    .map((s) => {
+      const good = s.value < 0;
+      const status = Math.abs(s.value) < Math.abs(decomp.actualDelta) * 0.02 ? 'neutral' : good ? 'good' : 'bad';
+      const share = decomp.actualDelta ? (s.value / decomp.actualDelta) * 100 : null;
+      const netIsSaving = decomp.actualDelta < 0;
+      const helped = share !== null && share > 0; // same direction as the net change
+      const shareText =
+        share === null || decomp.actualDelta === 0
+          ? 'n/a'
+          : helped
+            ? `${Math.abs(share).toFixed(0)}% of the ${netIsSaving ? 'saving' : 'increase'}`
+            : `gave back ${Math.abs(share).toFixed(0)}%`;
+      return `<tr>
+        <td><strong>${esc(s.label)}</strong></td>
+        <td class="num delta-${status}">${s.value > 0 ? '+' : ''}${esc(usd(s.value))}</td>
+        <td class="num">${esc(shareText)}</td>
+        <td class="meaning-cell">${esc(s.meaning)}</td>
+      </tr>`;
+    })
+    .join('');
+
+  return `${chart}
+  <table class="decomp">
+    <thead><tr><th>Driver</th><th class="num">Effect on cost per request</th><th class="num">Contribution</th><th>What it means</th></tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr><th>Net change</th><th class="num">${decomp.actualDelta > 0 ? '+' : ''}${esc(usd(decomp.actualDelta))}</th><th class="num">${decomp.actualDelta < 0 ? 'total saving' : 'total increase'}</th><th></th></tr></tfoot>
+  </table>
+  <p class="muted">These four drivers add up exactly to the observed change. "Model mix" is computed as the part the other three cannot explain, so a saving that really came from switching to a cheaper model can never be misreported as a setup improvement.</p>`;
+}
+
+// ---------------------------------------------------------------------------
+// Like-for-like by model
+// ---------------------------------------------------------------------------
+
+function modelComparisonSection(cmp) {
+  const base = new Map(cmp.baselineProfile.perModel.map((m) => [m.model, m]));
+  const comp = new Map(cmp.compareProfile.perModel.map((m) => [m.model, m]));
+  const keys = [...new Set([...base.keys(), ...comp.keys()])];
+
+  const rows = keys
+    .map((k) => {
+      const b = base.get(k);
+      const c = comp.get(k);
+      const pct = b && c && b.costPerRequest ? ((c.costPerRequest - b.costPerRequest) / b.costPerRequest) * 100 : null;
+      const status = pct === null ? 'neutral' : Math.abs(pct) < 2 ? 'neutral' : pct < 0 ? 'good' : 'bad';
+      return {
+        k,
+        b,
+        c,
+        pct,
+        html: `<tr>
+        <td>${esc(k)}</td>
+        <td class="num">${b ? fmtInt(b.requests) : '&mdash;'}</td>
+        <td class="num">${c ? fmtInt(c.requests) : '&mdash;'}</td>
+        <td class="num">${b ? esc(usd(b.costPerRequest)) : '&mdash;'}</td>
+        <td class="num">${c ? esc(usd(c.costPerRequest)) : '&mdash;'}</td>
+        <td class="num delta-${status}">${pct === null ? '&mdash;' : `${STATUS_GLYPH[status]} ${esc(fmtPct(pct))}`}</td>
+      </tr>`,
+      };
+    })
+    .sort((a, b) => (b.c?.cost ?? 0) - (a.c?.cost ?? 0));
+
+  const mix = cmp.insights.mix;
+  const mixWarning =
+    mix && mix.tvdPoints >= 15
+      ? `<p class="callout callout-warn"><strong>Workload mix moved a lot.</strong> ${mix.tvdPoints.toFixed(0)}% of your requests shifted between models compared with baseline
+         (${mix.rows
+           .slice(0, 3)
+           .map((r) => `${esc(r.model)} ${r.deltaPoints > 0 ? '+' : ''}${r.deltaPoints.toFixed(0)}pp`)
+           .join(', ')}).
+         The two windows are not perfectly like-for-like, so read the per-model rows below rather than the headline alone &mdash; they compare each model only against itself.</p>`
+      : `<p class="callout callout-ok"><strong>Workload mix is broadly comparable.</strong> Only ${mix ? mix.tvdPoints.toFixed(0) : '0'}% of requests shifted between models, so the headline number is a fair like-for-like read.</p>`;
+
+  return `${mixWarning}
+  <table>
+    <thead><tr><th>Model</th><th class="num">Baseline requests</th><th class="num">New requests</th><th class="num">Baseline $/request</th><th class="num">New $/request</th><th class="num">Change</th></tr></thead>
+    <tbody>${rows.map((r) => r.html).join('')}</tbody>
+  </table>
+  <p class="muted">Each row compares a model only against itself, so nothing here can be explained away by having run more work on a cheaper model.</p>`;
+}
+
+// ---------------------------------------------------------------------------
+// Distribution + the percentile explainer
+// ---------------------------------------------------------------------------
+
+const PERCENTILE_EXPLAINER = `<div class="explainer">
+  <h3>What P50 and P95 actually mean</h3>
+  <p>Line every request up from smallest to largest. A <strong>percentile</strong> is just "where in that line do I stand".</p>
+  <ul>
+    <li><strong>P50 &mdash; the middle request.</strong> Half your requests are smaller, half are bigger. This is your <em>typical</em> request. It is the same thing as the median. Watch this to answer &ldquo;did normal work get cheaper?&rdquo;</li>
+    <li><strong>P75 / P85 &mdash; the heavier end of normal.</strong> Three quarters, then roughly six in seven, of requests are smaller than this.</li>
+    <li><strong>P95 &mdash; your worst 1-in-20.</strong> Only one request in twenty is bigger. These are the runaway calls near the top of a long session. Watch this to answer &ldquo;did I stop the blowouts?&rdquo;</li>
+  </ul>
+  <p>Averages are misleading here because a handful of enormous requests drag the average far above what you actually experience most of the time. P50 and P95 together tell you what the average cannot: whether the <em>typical</em> case improved, and whether the <em>worst</em> case did.</p>
+</div>`;
+
+function distributionSection(reportData) {
+  const cmp = reportData.comparison;
+  const compareDist = reportData.distributions.tokensPerRequest;
+
+  const series = [];
+  if (cmp) {
+    const baseDist = cmp.distributions.tokensPerRequest.baseline;
+    if (baseDist.sample?.length) series.push({ label: 'Baseline', values: baseDist.sample, colorVar: 'series-1' });
+  }
+  if (compareDist.sample?.length) {
+    series.push({ label: cmp ? 'After changes' : 'All requests', values: compareDist.sample, colorVar: cmp ? 'series-2' : 'series-1' });
+  }
+
+  const chart = distributionChart(series);
+
+  const reading = cmp
+    ? (() => {
+        const pd = cmp.distributions.tokensPerRequest.percentileDeltas;
+        const p50 = pd.p50;
+        const p95 = pd.p95;
+        const typicalMoved = p50.pctChange !== null && p50.pctChange < -2;
+        const tailMoved = p95.pctChange !== null && p95.pctChange < -2;
+        let verdict;
+        if (typicalMoved && tailMoved) {
+          verdict = 'Both curves moved left: your typical request got smaller <em>and</em> your worst requests got smaller. That is the strongest possible shape for this chart &mdash; the whole distribution shifted, not just one end.';
+        } else if (typicalMoved) {
+          verdict = 'The typical request got smaller, but the worst 1-in-20 did not improve much. Everyday work is leaner; the long-session blowouts are still there.';
+        } else if (tailMoved) {
+          verdict = 'The worst requests got smaller but the typical one did not. You have capped the blowouts without making everyday work leaner.';
+        } else {
+          verdict = 'Neither the typical request nor the worst 1-in-20 moved meaningfully left. The distribution is broadly where it was.';
+        }
+        return `<p class="reading"><strong>How to read this chart:</strong> each curve shows what share of requests land at each size. A curve that sits further <em>left</em> means requests are smaller; a curve that is <em>taller and narrower</em> means they are more consistent. The vertical rules mark each period&rsquo;s typical (P50) request.</p>
+        <p class="reading">${verdict}</p>`;
+      })()
+    : `<p class="reading"><strong>How to read this chart:</strong> the curve shows what share of your requests land at each size. The vertical rule marks the typical (P50) request. After you change your setup, run <code>--compare</code> and a second curve appears here &mdash; if it sits to the left of this one, you used fewer tokens for the same work.</p>`;
+
+  const table = cmp ? percentileTable(cmp.distributions.tokensPerRequest) : baselinePercentileTable(compareDist);
+
+  return `${chart}${reading}${table}${PERCENTILE_EXPLAINER}`;
+}
+
+function percentileTable(cd) {
+  const labels = {
+    p50: 'P50 &mdash; typical request',
+    p75: 'P75 &mdash; heavier than normal',
+    p85: 'P85 &mdash; heavy',
+    p95: 'P95 &mdash; worst 1 in 20',
+  };
+  const rows = ['p50', 'p75', 'p85', 'p95']
+    .map((k) => {
+      const d = cd.percentileDeltas[k];
+      const status = d.pctChange === null ? 'neutral' : Math.abs(d.pctChange) < 2 ? 'neutral' : d.pctChange < 0 ? 'good' : 'bad';
+      return `<tr>
+        <td>${labels[k]}</td>
+        <td class="num">${fmtInt(d.baseline)}</td>
+        <td class="num">${fmtInt(d.compare)}</td>
+        <td class="num delta-${status}">${STATUS_GLYPH[status]} ${esc(fmtPct(d.pctChange))}</td>
+        <td>${lowConfBadge(d.lowConfidence)}</td>
+      </tr>`;
+    })
+    .join('');
+  return `<table>
+    <thead><tr><th>Where in the line</th><th class="num">Baseline tokens</th><th class="num">New tokens</th><th class="num">Change</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function baselinePercentileTable(dist) {
+  const labels = [
+    ['P50 &mdash; typical request', dist.percentiles.p50],
+    ['P75 &mdash; heavier than normal', dist.percentiles.p75],
+    ['P85 &mdash; heavy', dist.percentiles.p85],
+    ['P95 &mdash; worst 1 in 20', dist.percentiles.p95],
   ];
   return `<table>
-    <thead><tr><th>Class</th><th>Tokens</th><th>Share</th><th></th></tr></thead>
+    <thead><tr><th>Where in the line</th><th class="num">Tokens per request</th></tr></thead>
+    <tbody>${labels.map(([l, v]) => `<tr><td>${l}</td><td class="num">${fmtInt(v)}</td></tr>`).join('')}</tbody>
+  </table>`;
+}
+
+// ---------------------------------------------------------------------------
+// Token economics explainer
+// ---------------------------------------------------------------------------
+
+function tokenClassExplainer(reportData) {
+  const t = reportData.totals.tokens;
+  const share = reportData.totals.tokenShare;
+  const bar = stackedShareBar([
+    { label: 'Cache read', value: t.cacheReadTokens, valueText: fmtInt(t.cacheReadTokens), colorVar: 'series-1' },
+    { label: 'Cache write', value: t.cacheCreationTokens, valueText: fmtInt(t.cacheCreationTokens), colorVar: 'series-2' },
+    { label: 'Output', value: t.outputTokens, valueText: fmtInt(t.outputTokens), colorVar: 'series-3' },
+    { label: 'Input', value: t.inputTokens, valueText: fmtInt(t.inputTokens), colorVar: 'series-4' },
+  ]);
+
+  const costRows = [
+    ['Cache read', t.cacheReadTokens, share.cacheRead, '0.1x', 'Context Claude has seen before, served from cache. The cheapest thing you buy - and almost always the biggest count.'],
+    ['Cache write', t.cacheCreationTokens, share.cacheCreation, '1.25x', 'New material being written into the cache so later requests can read it cheaply.'],
+    ['Input', t.inputTokens, share.input, '1x', 'Context paid for at full price because it was not cacheable.'],
+    ['Output', t.outputTokens, share.output, '5x', 'What Claude writes back. The most expensive token class by a wide margin.'],
+  ];
+
+  return `${bar}
+  <table>
+    <thead><tr><th>Token class</th><th class="num">Count</th><th class="num">Share of tokens</th><th class="num">Relative price</th><th>What it is</th></tr></thead>
     <tbody>
-      ${rows
+      ${costRows
         .map(
-          ([label, val, pct]) => `<tr>
-        <td>${esc(label)}</td>
+          ([label, val, pct, mult, desc]) => `<tr>
+        <td><strong>${esc(label)}</strong></td>
         <td class="num">${fmtInt(val)}</td>
-        <td class="num">${fmtNum(pct)}%</td>
-        <td class="bar-cell"><div class="bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></td>
+        <td class="num">${fmtShare(pct)}</td>
+        <td class="num">${esc(mult)}</td>
+        <td class="meaning-cell">${esc(desc)}</td>
       </tr>`
         )
         .join('')}
     </tbody>
-  </table>`;
+  </table>
+  <p class="callout callout-info"><strong>This is why raw token counts mislead.</strong> Cache reads are ${fmtNum(share.cacheRead)}% of your token count but cost a tenth of an input token, while output is only ${fmtNum(share.output)}% of the count at five times the price of input. A &ldquo;total tokens&rdquo; figure is therefore roughly ${fmtNum(share.cacheRead, 0)}% driven by the cheapest thing you buy. Every headline number on this page is weighted by what each class actually costs.</p>`;
 }
+
+// ---------------------------------------------------------------------------
+// Detail tables (kept, collapsed)
+// ---------------------------------------------------------------------------
 
 function tierBreakdownTable(byTier) {
   const rows = Object.entries(byTier);
   const totalTokens = rows.reduce((acc, [, v]) => acc + v.tokens.total, 0) || 1;
+  const labels = {
+    main: 'Main conversation (you talking to Claude directly)',
+    subagent: 'Subagents (Task/Agent tool)',
+    'workflow-agent': 'Workflow agents (orchestrated fan-out)',
+  };
   return `<table>
-    <thead><tr><th>Tier</th><th>Requests</th><th>Tokens</th><th>Share</th></tr></thead>
+    <thead><tr><th>Tier</th><th class="num">Requests</th><th class="num">Tokens</th><th class="num">Share</th></tr></thead>
     <tbody>
       ${rows
         .map(
           ([tier, v]) => `<tr>
-        <td>${esc(tier)}</td>
+        <td>${esc(labels[tier] ?? tier)}</td>
         <td class="num">${fmtInt(v.requests)}</td>
         <td class="num">${fmtInt(v.tokens.total)}</td>
         <td class="num">${fmtNum((v.tokens.total / totalTokens) * 100)}%</td>
@@ -85,7 +435,7 @@ function tierBreakdownTable(byTier) {
 function groupedTotalsTable(rows, keyLabel, limit = 20) {
   const shown = rows.slice(0, limit);
   return `<table>
-    <thead><tr><th>${esc(keyLabel)}</th><th>Requests</th><th>Total tokens</th></tr></thead>
+    <thead><tr><th>${esc(keyLabel)}</th><th class="num">Requests</th><th class="num">Total tokens</th></tr></thead>
     <tbody>
       ${shown
         .map(
@@ -102,8 +452,8 @@ function groupedTotalsTable(rows, keyLabel, limit = 20) {
 
 function distributionTable(dist) {
   const p = dist.percentiles;
-  return `<table>
-    <thead><tr><th>n</th><th>mean</th><th>median</th><th>p75</th><th>p85</th><th>p95</th><th>min</th><th>max</th><th></th></tr></thead>
+  return `<h3>${esc(dist.metric)}</h3><table>
+    <thead><tr><th class="num">n</th><th class="num">mean</th><th class="num">P50</th><th class="num">P75</th><th class="num">P85</th><th class="num">P95</th><th class="num">min</th><th class="num">max</th><th></th></tr></thead>
     <tbody>
       <tr>
         <td class="num">${fmtInt(dist.n)}</td>
@@ -120,60 +470,16 @@ function distributionTable(dist) {
   </table>`;
 }
 
-function distributionsSection(distributions) {
-  return Object.values(distributions)
-    .map((dist) => `<h3>${esc(dist.metric)}</h3>${distributionTable(dist)}`)
-    .join('');
-}
-
-function comparisonSection(comparison) {
-  if (!comparison) return '';
-  const rows = Object.values(comparison.distributions)
-    .map((cmp) => {
-      const mw = cmp.mannWhitney;
-      const mwCell = mw.skipped
-        ? `${badge('insufficient data', 'warn')} <span class="muted">${esc(mw.reason)}</span>, trend ${esc(mw.directionalTrend)}`
-        : `${esc(mw.effectSizeLabel)} effect (r=${fmtNum(mw.rankBiserial, 2)}), p=${fmtNum(mw.pValue, 3)}`;
-      return `<div class="cmp-metric">
-        <h3>${esc(cmp.metric)}</h3>
-        <p class="verdict">${esc(cmp.verdict)}</p>
-        <table>
-          <thead><tr><th>Percentile</th><th>Baseline</th><th>Compare</th><th>% change</th><th></th></tr></thead>
-          <tbody>
-            ${['p50', 'p75', 'p85', 'p95']
-              .map((k) => {
-                const d = cmp.percentileDeltas[k];
-                return `<tr>
-                <td>${k}</td>
-                <td class="num">${fmtInt(d.baseline)}</td>
-                <td class="num">${fmtInt(d.compare)}</td>
-                <td class="num">${fmtPct(d.pctChange)}</td>
-                <td>${lowConfBadge(d.lowConfidence)}</td>
-              </tr>`;
-              })
-              .join('')}
-          </tbody>
-        </table>
-        <p class="muted">Significance: ${mwCell}</p>
-        ${
-          cmp.compare.bootstrapCI
-            ? `<p class="muted">Approx 90% CI on compare median: ${fmtInt(cmp.compare.bootstrapCI.median?.low)}–${fmtInt(cmp.compare.bootstrapCI.median?.high)} (${cmp.compare.bootstrapCI.median?.resamples} resamples)</p>`
-            : ''
-        }
-      </div>`;
-    })
-    .join('');
-  return `<p class="headline">${esc(comparison.headlineVerdict)}</p>${rows}`;
-}
-
-function compactionSection(compaction) {
-  return `<table>
+function compactionSection(compaction, requests) {
+  const per1k = requests ? compaction.count / (requests / 1000) : null;
+  return `<p class="lede">A compaction happens when a session fills its context window and has to be summarized down. It costs tokens and loses detail, so fewer is better.</p>
+  <table>
     <tbody>
-      <tr><th>Compaction events</th><td class="num">${fmtInt(compaction.count)}</td></tr>
-      <tr><th>Manual / Auto</th><td class="num">${fmtInt(compaction.byTrigger.manual ?? 0)} / ${fmtInt(compaction.byTrigger.auto ?? 0)}</td></tr>
-      <tr><th>Total dropped tokens</th><td class="num">${fmtInt(compaction.totalDroppedTokens)}</td></tr>
-      <tr><th>Avg pre / post tokens</th><td class="num">${fmtInt(compaction.avgPreTokens)} / ${fmtInt(compaction.avgPostTokens)}</td></tr>
-      <tr><th>Avg duration (ms)</th><td class="num">${fmtInt(compaction.avgDurationMs)}</td></tr>
+      <tr><th>Compactions</th><td class="num">${fmtInt(compaction.count)}</td></tr>
+      <tr><th>Per 1,000 requests</th><td class="num">${per1k === null ? 'n/a' : fmtNum(per1k)}</td></tr>
+      <tr><th>Manual / automatic</th><td class="num">${fmtInt(compaction.byTrigger.manual ?? 0)} / ${fmtInt(compaction.byTrigger.auto ?? 0)}</td></tr>
+      <tr><th>Tokens dropped in total</th><td class="num">${fmtInt(compaction.totalDroppedTokens)}</td></tr>
+      <tr><th>Average context before / after</th><td class="num">${fmtInt(compaction.avgPreTokens)} / ${fmtInt(compaction.avgPostTokens)}</td></tr>
     </tbody>
   </table>`;
 }
@@ -185,13 +491,24 @@ function attachmentsSection(attachments) {
   const topMemRows = attachments.topNestedMemory
     .map((s) => `<tr><td>${esc(s.key)}</td><td class="num">${fmtInt(s.count)}</td><td class="num">${fmtInt(s.totalBytes)}</td></tr>`)
     .join('');
-  return `<h3>Top skills by injected bytes</h3>
-  <table><thead><tr><th>Skill</th><th>Invocations</th><th>Total bytes</th></tr></thead><tbody>${topSkillsRows || '<tr><td colspan="3" class="muted">none observed</td></tr>'}</tbody></table>
-  <h3>Top nested-memory (CLAUDE.md) injections by bytes</h3>
-  <table><thead><tr><th>Path</th><th>Injections</th><th>Total bytes</th></tr></thead><tbody>${topMemRows || '<tr><td colspan="3" class="muted">none observed</td></tr>'}</tbody></table>`;
+  return `<p class="lede">Skills and <code>CLAUDE.md</code> files are injected into context when they load, and then re-read on every subsequent request in that session. Large entries here are among the easiest things to trim.</p>
+  <h3>Skills by injected bytes</h3>
+  <table><thead><tr><th>Skill</th><th class="num">Invocations</th><th class="num">Total bytes</th></tr></thead><tbody>${topSkillsRows || '<tr><td colspan="3" class="muted">none observed</td></tr>'}</tbody></table>
+  <h3>CLAUDE.md injections by bytes</h3>
+  <table><thead><tr><th>Path</th><th class="num">Injections</th><th class="num">Total bytes</th></tr></thead><tbody>${topMemRows || '<tr><td colspan="3" class="muted">none observed</td></tr>'}</tbody></table>`;
 }
 
-function toolPayloadSection(toolPayload) {
+function toolPayloadSection(toolPayload, requests) {
+  const chart = toolPayload.length
+    ? horizontalBars(
+        toolPayload.slice(0, 8).map((t) => ({
+          label: t.tool,
+          value: t.totalBytes,
+          valueText: `${fmtCompact(t.totalBytes)} B`,
+          colorVar: 'series-1',
+        }))
+      )
+    : '';
   const rows = toolPayload
     .map(
       (t) => `<tr>
@@ -204,90 +521,301 @@ function toolPayloadSection(toolPayload) {
     </tr>`
     )
     .join('');
-  return `<table>
-    <thead><tr><th>Tool</th><th>Calls</th><th>Total bytes</th><th>Mean bytes</th><th>Max bytes</th><th>Errors</th></tr></thead>
+  const totalBytes = toolPayload.reduce((a, t) => a + t.totalBytes, 0);
+  return `<p class="lede">Everything a tool returns stays in context for the rest of the session, so it is paid for again on every later request. Across this window tool results contributed ${fmtInt(totalBytes)} bytes, about ${requests ? fmtInt(totalBytes / requests) : 'n/a'} bytes per request. Trimming large reads and noisy command output is one of the most direct levers you have.</p>
+  ${chart}
+  <table>
+    <thead><tr><th>Tool</th><th class="num">Calls</th><th class="num">Total bytes</th><th class="num">Mean bytes</th><th class="num">Max bytes</th><th class="num">Errors</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="6" class="muted">no tool-result data attributable</td></tr>'}</tbody>
   </table>`;
 }
 
+// ---------------------------------------------------------------------------
+// Baseline-mode "where you stand"
+// ---------------------------------------------------------------------------
+
+function baselineStanding(reportData) {
+  const p = reportData.profile;
+  const cards = [
+    ['Estimated spend in this window', usd(reportData.cost.total), 'What the scanned activity would have cost at published API list rates.'],
+    ['Cost per request', usd(p.costPerRequest), 'The number to beat. Re-run --compare after your changes and this is what moves.'],
+    ['Context re-read per request', fmtInt(p.contextPerRequest), 'How much Claude re-reads before answering anything. The metric your setup most directly controls.'],
+    ['Output per request', fmtInt(p.outputPerRequest), 'How much Claude writes back, in tokens.'],
+    ['Cache hit rate', `${(p.cacheHitRate * 100).toFixed(1)}%`, 'Share of re-read context served from cache at a tenth of the price. Higher is better.'],
+    ['Requests captured', fmtInt(reportData.totals.requests), `Across ${fmtInt(reportData.scan.filesScanned)} transcript files.`],
+  ];
+  return `<div class="kpi-grid">
+    ${cards
+      .map(
+        ([label, value, meaning]) => `<div class="kpi kpi-neutral">
+      <div class="kpi-label">${esc(label)}</div>
+      <div class="kpi-values"><span class="kpi-after">${esc(value)}</span></div>
+      <p class="kpi-meaning">${esc(meaning)}</p>
+    </div>`
+      )
+      .join('')}
+  </div>
+  <p class="callout callout-info"><strong>This is your reference point.</strong> Nothing here is good or bad on its own &mdash; it is the line everything gets measured against. Make your setup changes now, keep working normally for a few days, then run <code>--compare</code>. That report will answer &ldquo;did it work?&rdquo; directly.</p>`;
+}
+
+// ---------------------------------------------------------------------------
+// Method explainer
+// ---------------------------------------------------------------------------
+
+function methodExplainer(reportData) {
+  const m = reportData.cost.model;
+  return `<div class="explainer">
+    <h3>Why rates, not totals</h3>
+    <p>A baseline covers everything on disk (often a month); a compare covers only what happened since. Comparing those totals directly would just tell you which window was longer. So every headline figure is a <strong>rate</strong> &mdash; per request, per session, per active hour &mdash; which stays comparable no matter how long each window ran.</p>
+
+    <h3>How the cost estimate is built</h3>
+    <p>Each token is priced by its class and the model that produced it, using published Claude API list rates: cache reads at <strong>${m.cacheReadMultiplier}&times;</strong> the model&rsquo;s input rate, cache writes at <strong>${m.cacheWriteMultiplier}&times;</strong>, and output at that model&rsquo;s own output rate. The price table is frozen (version <code>${esc(m.priceTableVersion)}</code>) and identical on both sides of every comparison &mdash; otherwise a price change by Anthropic would show up as your efficiency win.</p>
+    <p class="callout callout-warn"><strong>This is an estimate, not your bill.</strong> Claude Code transcripts contain no billing signal, and on a subscription plan you are not charged per token at all. Treat the dollar figures as a consistently-weighted way to compare two periods against each other, not as an amount anybody invoiced you.${reportData.cost.unpricedRequests ? ` ${fmtInt(reportData.cost.unpricedRequests)} request(s) ran on a model with no entry in the price table and were costed at the Opus tier.` : ''}</p>
+
+    <h3>What &ldquo;statistically significant&rdquo; means here</h3>
+    <p>Any two periods will differ a bit by luck. The report runs a Mann-Whitney U test, which asks: if nothing had really changed, how often would a difference this large turn up anyway? Below a 1-in-20 chance, the result is called real. Below 10 samples on either side the test is skipped entirely and only a direction is reported &mdash; never treat that as a result.</p>
+
+    <h3>What this tool can and cannot see</h3>
+    <ul>
+      <li>It reads local transcript files only. Anything not written to <code>~/.claude</code> is invisible to it.</li>
+      <li>Local transcripts rotate after roughly 30 days. A baseline&rsquo;s stored statistics stay valid as a reference forever, but that exact historical window can never be re-scanned once the source files age out.</li>
+      <li>There is no per-day breakdown in the stored data, so this report compares two periods as blocks rather than plotting a trend line over time.</li>
+    </ul>
+  </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+
 const STYLE = `
   :root {
-    --bg: #ffffff; --fg: #1b1f24; --muted: #5b6470; --border: #dfe3e8; --accent: #2f6fed;
-    --warn-bg: #fff3cd; --warn-fg: #7a5a00; --info-bg: #e7f1ff; --info-fg: #1f4e9c;
-    --bar-bg: #eef2f7;
+    color-scheme: light;
+    --bg: #ffffff; --surface: #fcfcfb; --fg: #1b1f24; --muted: #5b6470; --border: #dfe3e8;
+    --accent: #2a78d6;
+    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+    --good: #0ca30c; --bad: #d03b3b; --warn: #fab219; --neutral: #5b6470;
+    --good-bg: #eefaee; --bad-bg: #fdeeee; --warn-bg: #fff8e6; --info-bg: #eef4fd; --neutral-bg: #f3f5f7;
+    --grid: #ebeef2;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #14171c; --fg: #e6e9ee; --muted: #9aa4b2; --border: #2b3038; --accent: #6ea1ff;
-      --warn-bg: #3a3117; --warn-fg: #f0d27a; --info-bg: #17263d; --info-fg: #9cc2ff;
-      --bar-bg: #1e232b;
+      color-scheme: dark;
+      --bg: #14171c; --surface: #1a1a19; --fg: #e6e9ee; --muted: #9aa4b2; --border: #2b3038;
+      --accent: #3987e5;
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+      --good: #0ca30c; --bad: #d03b3b; --warn: #fab219; --neutral: #9aa4b2;
+      --good-bg: #10240f; --bad-bg: #2c1416; --warn-bg: #2d2510; --info-bg: #131f31; --neutral-bg: #1e232b;
+      --grid: #262b33;
     }
   }
   * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 2rem; line-height: 1.5; }
-  .wrap { max-width: 960px; margin: 0 auto; }
-  h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
-  h2 { font-size: 1.2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; margin-top: 2.5rem; }
-  h3 { font-size: 1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; color: var(--muted); }
-  table { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1rem; font-size: 0.92rem; }
-  th, td { border-bottom: 1px solid var(--border); padding: 0.35rem 0.6rem; text-align: left; }
+  body { background: var(--bg); color: var(--fg); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 2rem 1rem 4rem; line-height: 1.55; }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 1.75rem; margin: 0 0 0.25rem; letter-spacing: -0.01em; }
+  h2 { font-size: 1.25rem; border-bottom: 1px solid var(--border); padding-bottom: 0.45rem; margin-top: 3rem; letter-spacing: -0.01em; }
+  h3 { font-size: 0.98rem; margin: 1.5rem 0 0.5rem; }
+  p { margin: 0.6rem 0; }
+  code { background: var(--neutral-bg); padding: 0.08em 0.35em; border-radius: 4px; font-size: 0.88em; white-space: nowrap; }
+  .lede { color: var(--muted); max-width: 74ch; }
+  .muted { color: var(--muted); font-size: 0.86rem; max-width: 80ch; }
+
+  table { border-collapse: collapse; width: 100%; margin: 0.75rem 0 1rem; font-size: 0.9rem; }
+  th, td { border-bottom: 1px solid var(--border); padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
   th { color: var(--muted); font-weight: 600; }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .bar-cell { width: 30%; }
-  .bar { height: 0.6rem; background: var(--accent); border-radius: 3px; background-clip: padding-box; }
-  .bar-cell { background: var(--bar-bg); border-radius: 3px; }
-  .muted { color: var(--muted); font-size: 0.85rem; }
-  .headline { font-size: 1.05rem; font-weight: 600; margin: 0.5rem 0 1.5rem; }
-  .verdict { margin: 0.25rem 0 0.75rem; }
-  .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem; margin-right: 0.3rem; }
-  .badge-warn { background: var(--warn-bg); color: var(--warn-fg); }
-  .badge-info { background: var(--info-bg); color: var(--info-fg); }
-  .badge-default { background: var(--bar-bg); color: var(--muted); }
-  .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; margin: 1rem 0; }
-  .meta-item { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; }
-  .meta-item .label { color: var(--muted); font-size: 0.78rem; }
-  .meta-item .value { font-size: 1.1rem; font-weight: 600; overflow-wrap: anywhere; word-break: break-word; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .meaning-cell { color: var(--muted); font-size: 0.85rem; max-width: 42ch; }
+  .table-scroll { overflow-x: auto; }
+
+  /* Verdict */
+  .verdict { display: grid; grid-template-columns: minmax(190px, 250px) 1fr; gap: 1.75rem; align-items: center;
+             border: 1px solid var(--border); border-left: 5px solid var(--neutral); border-radius: 12px; padding: 1.5rem; margin: 1.5rem 0 0; background: var(--surface); }
+  .verdict-good { border-left-color: var(--good); }
+  .verdict-bad { border-left-color: var(--bad); }
+  .verdict-neutral { border-left-color: var(--neutral); }
+  .hero-number { font-size: 3.4rem; font-weight: 700; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+  .verdict-good .hero-number { color: var(--good); }
+  .verdict-bad .hero-number { color: var(--bad); }
+  .hero-caption { color: var(--muted); font-size: 0.88rem; margin-top: 0.5rem; }
+  .verdict-answer { font-size: 1.08rem; margin-top: 0; }
+  .sig { font-size: 0.88rem; color: var(--muted); border-top: 1px solid var(--border); padding-top: 0.6rem; margin-bottom: 0; }
+
+  /* Findings */
+  .findings { list-style: none; padding: 0; margin: 1rem 0; display: grid; gap: 0.65rem; }
+  .finding { border: 1px solid var(--border); border-left: 4px solid var(--neutral); border-radius: 9px; padding: 0.8rem 1rem; background: var(--surface); }
+  .finding-good { border-left-color: var(--good); }
+  .finding-bad { border-left-color: var(--bad); }
+  .finding-warn { border-left-color: var(--warn); }
+  .finding-head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+  .finding-glyph { font-size: 0.8rem; }
+  .finding-good .finding-glyph, .finding-good .finding-tag { color: var(--good); }
+  .finding-bad .finding-glyph, .finding-bad .finding-tag { color: var(--bad); }
+  .finding-warn .finding-glyph, .finding-warn .finding-tag { color: var(--warn); }
+  .finding-tag { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+  .finding-title { font-weight: 650; font-size: 1rem; }
+  .finding-meaning { color: var(--muted); font-size: 0.89rem; margin: 0.35rem 0 0; max-width: 82ch; }
+
+  /* KPI cards */
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 0.75rem; margin: 1rem 0; }
+  .kpi { border: 1px solid var(--border); border-radius: 10px; padding: 0.85rem 1rem; background: var(--surface); }
+  .kpi-label { color: var(--muted); font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  .kpi-values { display: flex; align-items: baseline; gap: 0.5rem; margin: 0.4rem 0 0.15rem; flex-wrap: wrap; }
+  .kpi-before { color: var(--muted); font-size: 1rem; text-decoration: line-through; text-decoration-thickness: 1px; font-variant-numeric: tabular-nums; }
+  .kpi-arrow { color: var(--muted); }
+  .kpi-after { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .kpi-delta { font-size: 0.82rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kpi-word { font-weight: 500; opacity: 0.75; }
+  .kpi-delta-good { color: var(--good); } .kpi-delta-bad { color: var(--bad); }
+  .kpi-delta-warn { color: var(--warn); } .kpi-delta-neutral { color: var(--muted); }
+  .kpi-meaning { color: var(--muted); font-size: 0.83rem; margin: 0.5rem 0 0; }
+
+  .delta-good { color: var(--good); } .delta-bad { color: var(--bad); } .delta-neutral { color: var(--muted); }
+
+  /* Callouts + explainers */
+  .callout { border-radius: 9px; padding: 0.8rem 1rem; font-size: 0.89rem; margin: 1rem 0; border: 1px solid var(--border); max-width: 88ch; }
+  .callout-warn { background: var(--warn-bg); }
+  .callout-info { background: var(--info-bg); }
+  .callout-ok { background: var(--good-bg); }
+  .explainer { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.25rem; margin: 1.25rem 0; }
+  .explainer h3 { margin-top: 1.1rem; font-size: 0.95rem; color: var(--fg); }
+  .explainer h3:first-child { margin-top: 0; }
+  .explainer p, .explainer li { font-size: 0.89rem; color: var(--muted); max-width: 84ch; }
+  .explainer strong { color: var(--fg); }
+  .explainer ul { padding-left: 1.15rem; }
+  .explainer li { margin: 0.3rem 0; }
+  .reading { font-size: 0.9rem; color: var(--muted); max-width: 84ch; }
+  .reading strong, .reading em { color: var(--fg); }
+
+  /* Charts */
+  .chart { margin: 1.25rem 0; padding: 0; overflow-x: auto; }
+  .chart svg { display: block; min-width: 460px; }
+  .grid { stroke: var(--grid); stroke-width: 1; }
+  .axis { stroke: var(--border); stroke-width: 1; }
+  .tick, .axis-title, .row-label, .bar-val, .seg-label, .median-label, .wf-val {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--muted); font-size: 11px; }
+  .axis-title { font-size: 11px; }
+  .row-label { fill: var(--fg); font-size: 12px; }
+  .bar-val { font-variant-numeric: tabular-nums; }
+  .seg-label { fill: var(--fg); font-size: 11px; font-weight: 600; }
+  .median-label { font-size: 11px; font-weight: 650; }
+  .wf-val { fill: var(--fg); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .dist-fill { opacity: 0.16; }
+  .dist-line { fill: none; stroke-width: 2; stroke-linejoin: round; }
+  .median-rule { stroke-width: 2; opacity: 0.85; }
+  .bar-a { fill: var(--series-1); }
+  .bar-b { fill: var(--series-2); }
+  .delta { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; fill: var(--muted); }
+  .delta-good { fill: var(--good); } .delta-bad { fill: var(--bad); } .delta-neutral { fill: var(--muted); }
+  .wf-total { fill: var(--neutral); opacity: 0.55; }
+  .wf-down { fill: var(--series-1); }
+  .wf-up { fill: var(--series-2); }
+  .wf-connector { stroke: var(--border); stroke-width: 1; }
+  .legend { display: flex; gap: 1.1rem; flex-wrap: wrap; font-size: 0.85rem; color: var(--fg); margin-top: 0.4rem; }
+  .legend-item { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  figcaption { font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; max-width: 84ch; }
+
+  /* Meta + misc */
+  .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.6rem; margin: 1rem 0; }
+  .meta-item { border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.7rem; background: var(--surface); }
+  .meta-item .label { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .meta-item .value { font-size: 1rem; font-weight: 600; overflow-wrap: anywhere; word-break: break-word; }
   .meta-item.wide { grid-column: 1 / -1; }
-  .meta-item.wide .value { font-size: 0.95rem; }
-  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; }
-  .cmp-metric { margin-bottom: 2rem; }
+  .meta-item.wide .value { font-size: 0.88rem; font-weight: 500; }
+  .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.72rem; margin-right: 0.3rem; background: var(--neutral-bg); color: var(--muted); }
+  .badge-warn { background: var(--warn-bg); color: var(--fg); }
+  .badge-info { background: var(--info-bg); color: var(--fg); }
+  details { border: 1px solid var(--border); border-radius: 9px; padding: 0.5rem 1rem; margin: 0.6rem 0; background: var(--surface); }
+  details > summary { cursor: pointer; font-weight: 600; font-size: 0.94rem; padding: 0.3rem 0; }
+  footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.83rem; }
+  footer p { max-width: 88ch; }
+
+  @media (max-width: 720px) {
+    .verdict { grid-template-columns: 1fr; gap: 1rem; }
+    body { padding: 1.25rem 0.85rem 3rem; }
+  }
 `;
 
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 export function renderHtmlReport(reportData) {
-  const modeLabel = reportData.mode === 'baseline' ? 'Baseline' : 'Compare';
+  const isCompare = reportData.mode === 'compare';
+  const cmp = reportData.comparison;
+
   const metaItems = [
-    ['Mode', modeLabel],
-    ['Generated', reportData.generatedAt],
-    ['Scanned dir', reportData.claudeDir, true],
-    ['Files scanned', fmtInt(reportData.scan.filesScanned)],
-    ['New files', fmtInt(reportData.scan.newFiles)],
-    ['Corrupt lines skipped', fmtInt(reportData.scan.corruptLineCount)],
-    ['Deduped requests', fmtInt(reportData.totals.requests)],
+    ['Generated', fmtWhen(reportData.generatedAt), false, true],
+    ['Requests measured', fmtInt(reportData.totals.requests)],
+    ['Transcript files', fmtInt(reportData.scan.filesScanned)],
+    ['Estimated spend', usd(reportData.cost.total)],
   ];
-  if (reportData.mode === 'compare') metaItems.push(['Baseline ref', reportData.baselineRef, true]);
+  if (isCompare) metaItems.push(['Compared against', reportData.baselineRef, true]);
+  metaItems.push(['Scanned directory', reportData.claudeDir, true]);
+
+  const title = isCompare ? 'Did the changes work?' : 'Your usage baseline';
+  const subtitle = isCompare
+    ? 'Everything below compares activity since your baseline against the baseline itself, normalized so the two periods are directly comparable.'
+    : 'A reference point for everything you measure from here. Make your changes, then run <code>--compare</code>.';
 
   const body = `<div class="wrap">
-  <h1>Claude Code usage ${esc(modeLabel.toLowerCase())} report</h1>
+  <h1>${esc(title)}</h1>
+  <p class="lede">${subtitle}</p>
   <div class="meta-grid">
-    ${metaItems.map(([label, value, wide]) => `<div class="meta-item${wide ? ' wide' : ''}"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`).join('')}
+    ${metaItems
+      .map(
+        ([label, value, wide, isHtml]) =>
+          `<div class="meta-item${wide ? ' wide' : ''}"><div class="label">${esc(label)}</div><div class="value">${isHtml ? value : esc(value)}</div></div>`
+      )
+      .join('')}
   </div>
 
-  ${reportData.comparison ? section('Compare vs baseline', comparisonSection(reportData.comparison)) : ''}
+  ${
+    isCompare && cmp
+      ? `${verdictSection(reportData)}
+  ${section('What changed, and what it means', findingsSection(cmp.insights.findings), {
+    lede: 'Each item below is a metric that moved enough to be worth your attention, with what it actually tells you about your setup.',
+  })}
+  ${section('The numbers behind that verdict', kpiSection(cmp.insights.kpis), {
+    lede: 'Every figure is per request, so the two periods stay comparable even though one covers far more activity than the other.',
+  })}
+  ${section('Where the change came from', decompositionSection(cmp.decomposition), {
+    lede: 'Splitting the change in cost per request into the things that actually caused it. Bars below the line saved you money; bars above it cost you money.',
+  })}
+  ${section('Like-for-like, model by model', modelComparisonSection(cmp), {
+    lede: 'The honesty check. An overall improvement can be manufactured simply by running more work on a cheaper model, so this section compares each model only against itself.',
+  })}`
+      : `${section('Where you stand today', baselineStanding(reportData))}`
+  }
 
-  ${section('Token breakdown by class', tokenClassBreakdownTable(reportData.totals.tokens, reportData.totals.tokenShare))}
-  ${section('Token breakdown by tier', tierBreakdownTable(reportData.byTier))}
-  ${section('Token breakdown by agent type', groupedTotalsTable(reportData.byAgentType, 'Agent type'))}
-  ${section('Token breakdown by model', groupedTotalsTable(reportData.byModel, 'Model'))}
-  ${section('Distributions', distributionsSection(reportData.distributions))}
-  ${section('Compaction events', compactionSection(reportData.compaction))}
-  ${section('Skill / memory injection cost', attachmentsSection(reportData.attachments))}
-  ${section('Tool payload cost', toolPayloadSection(reportData.toolPayload))}
+  ${section('How big is a typical request?', distributionSection(reportData), {
+    lede: 'This is the chart that makes percentiles concrete. Everything else on this page is a summary of what you can see here directly.',
+  })}
+
+  ${section('Where your tokens actually go', tokenClassExplainer(reportData), {
+    lede: 'Not all tokens cost the same. Understanding this is the difference between a number that looks alarming and one that matters.',
+  })}
+
+  ${section('Your biggest levers', toolPayloadSection(reportData.toolPayload, reportData.totals.requests), {
+    lede: 'Concrete, actionable places where context gets consumed - ranked so you know what to trim first.',
+  })}
+
+  ${section('How to read this report', methodExplainer(reportData))}
+
+  <h2>Full detail</h2>
+  <details><summary>Breakdown by tier</summary>${tierBreakdownTable(reportData.byTier)}</details>
+  <details><summary>Breakdown by agent type (${reportData.byAgentType.length})</summary><div class="table-scroll">${groupedTotalsTable(reportData.byAgentType, 'Agent type')}</div></details>
+  <details><summary>Breakdown by model</summary><div class="table-scroll">${groupedTotalsTable(reportData.byModel, 'Model')}</div></details>
+  <details><summary>Skill and CLAUDE.md injection cost</summary><div class="table-scroll">${attachmentsSection(reportData.attachments)}</div></details>
+  <details><summary>Compaction events</summary>${compactionSection(reportData.compaction, reportData.totals.requests)}</details>
+  <details><summary>Raw distribution statistics</summary><div class="table-scroll">${Object.values(reportData.distributions)
+    .map((d) => distributionTable(d))
+    .join('')}</div></details>
 
   <footer>
-    <p><strong>Data-quality notes:</strong> ${fmtInt(reportData.scan.corruptLineCount)} corrupt/partial JSONL lines were skipped and safely left for the next scan to re-read. ${fmtInt(reportData.scan.boundaryReconciliations ?? 0)} boundary reconciliations (messages already attributed to a prior scan period) were excluded from this report's own totals.</p>
-    <p>All figures are <strong>token-count proxies</strong>, not billing data - no reliable USD cost signal exists in local Claude Code transcripts on subscription plans.</p>
-    <p>Local transcript retention is roughly 30 days; a baseline computed today cannot be regenerated for this exact historical window once source transcripts rotate out. This report's own stored stats remain valid indefinitely as a comparison reference regardless.</p>
-    <p>Generated by claude-usage-baseliner.</p>
+    <p><strong>Data quality:</strong> ${fmtInt(reportData.scan.corruptLineCount)} corrupt or partial transcript lines were skipped and left for the next scan to re-read. ${fmtInt(reportData.scan.boundaryReconciliations ?? 0)} messages already counted in an earlier period were excluded so nothing is double-counted.</p>
+    <p><strong>Dollar figures are estimates at published API list rates, not billing data.</strong> Claude Code transcripts contain no cost signal, and subscription plans are not billed per token. Use them to compare two periods on a consistent basis, nothing more.</p>
+    <p>Generated by claude-usage-baseliner &middot; price table ${esc(reportData.cost.model.priceTableVersion)}.</p>
   </footer>
 </div>`;
 
@@ -296,7 +824,7 @@ export function renderHtmlReport(reportData) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Usage ${esc(modeLabel)} Report - ${esc(reportData.id)}</title>
+<title>${esc(title)} - ${esc(reportData.id)}</title>
 <style>${STYLE}</style>
 </head>
 <body>
