@@ -56,6 +56,12 @@ function fmtWhen(iso) {
   return `<span title="${esc(iso)}">${esc(date)}, ${esc(time)}</span>`;
 }
 
+// Fixed 2-dp so a column of rates lines up; fmtNum would render 0 as "0" beside "2.98%".
+function fmtRate(fraction) {
+  if (fraction === null || fraction === undefined || Number.isNaN(fraction)) return 'n/a';
+  return `${(fraction * 100).toFixed(2)}%`;
+}
+
 function badge(text, kind = 'default') {
   return `<span class="badge badge-${kind}">${esc(text)}</span>`;
 }
@@ -86,7 +92,7 @@ function verdictSection(reportData) {
   const d = ins.deltas.costDelta;
   const sig = ins.significance;
 
-  const direction = d === null ? 'neutral' : Math.abs(d) < 2 ? 'neutral' : d < 0 ? 'good' : 'bad';
+  const rawDirection = d === null ? 'neutral' : Math.abs(d) < 2 ? 'neutral' : d < 0 ? 'good' : 'bad';
   const heroText = d === null ? 'n/a' : `${d > 0 ? '+' : ''}${d.toFixed(1)}%`;
   const heroCaption =
     d === null
@@ -97,14 +103,26 @@ function verdictSection(reportData) {
           ? 'more expensive per request than your baseline'
           : 'essentially unchanged versus your baseline';
 
+  const qw = ins.qualityWarning;
+  const overlap = ins.overlap;
+  const notComparable = overlap && !overlap.comparable;
+
+  // A cost saving bought with a higher failure rate, or measured on different work, is not a clean
+  // success - the headline must say so rather than leaving the caveat to a section further down.
   const answer =
     d === null
       ? 'There is not enough new activity yet to answer this.'
       : d < -2
-        ? `<strong>Yes.</strong> Since your baseline, the same unit of work costs measurably less.`
+        ? qw
+          ? `<strong>Cheaper, but not clearly better.</strong> The same unit of work costs measurably less &mdash; and tool calls now fail more often, so some of that saving may have been bought with mistakes and retries.`
+          : notComparable
+            ? `<strong>Cheaper, but on different work.</strong> Cost per request fell, but this window ran largely different jobs from your baseline, so this is not yet a controlled before/after.`
+            : `<strong>Yes.</strong> Since your baseline, the same unit of work costs measurably less.`
         : d > 2
           ? `<strong>No.</strong> Since your baseline, the same unit of work costs measurably more.`
           : `<strong>No measurable change.</strong> Cost per request is within a couple of percent of your baseline.`;
+
+  const direction = rawDirection === 'good' && (ins.qualityWarning || (ins.overlap && !ins.overlap.comparable)) ? 'warn' : rawDirection;
 
   return `<div class="verdict verdict-${direction}">
     <div class="verdict-hero">
@@ -116,6 +134,7 @@ function verdictSection(reportData) {
       <p>Cost per request went from <strong>${esc(usd(cmp.baselineProfile.costPerRequest))}</strong> at baseline to
          <strong>${esc(usd(cmp.compareProfile.costPerRequest))}</strong> across
          ${esc(fmtInt(cmp.compareProfile.requests))} new requests.</p>
+      ${qw ? `<p class="quality-warn"><strong>Quality warning.</strong> ${esc(qw.text)} Cost is an input measure &mdash; it cannot tell you whether the work was any good, so do not read the number on the left as &ldquo;better&rdquo;.</p>` : ''}
       ${
         sig
           ? `<p class="sig sig-${sig.status}"><strong>${esc(sig.short)}.</strong> ${esc(sig.text)}</p>`
@@ -264,6 +283,93 @@ function modelComparisonSection(cmp) {
     <tbody>${rows.map((r) => r.html).join('')}</tbody>
   </table>
   <p class="muted">Each row compares a model only against itself, so nothing here can be explained away by having run more work on a cheaper model.</p>`;
+}
+
+// ---------------------------------------------------------------------------
+// Quality: did it actually get better, or just cheaper?
+// ---------------------------------------------------------------------------
+
+function qualitySection(cmp) {
+  const ins = cmp.insights;
+  const f = ins.failure;
+  const o = f.overall;
+  const pTxt = (p) => (p < 0.001 ? '&lt;0.001' : p.toFixed(3));
+
+  const headline = o.skipped
+    ? `<p class="callout callout-warn"><strong>Not enough tool calls to judge.</strong> ${esc(o.reason)}. Keep working and re-run &mdash; this is the one quality signal available, so it is worth waiting for.</p>`
+    : o.significant
+      ? o.direction === 'up'
+        ? `<p class="callout callout-warn"><strong>Failure rate rose, and the rise is real.</strong> ${fmtNum(o.rate1 * 100, 2)}% of tool calls errored at baseline versus ${fmtNum(o.rate2 * 100, 2)}% now (p=${pTxt(o.pValue)}). Retries cost tokens as well as quality, so this can erode the saving it appears to sit alongside.</p>`
+        : `<p class="callout callout-ok"><strong>Failure rate fell, and the fall is real.</strong> ${fmtNum(o.rate1 * 100, 2)}% of tool calls errored at baseline versus ${fmtNum(o.rate2 * 100, 2)}% now (p=${pTxt(o.pValue)}). Fewer retries is both a quality and a cost win.</p>`
+      : `<p class="callout callout-ok"><strong>No detectable change in failure rate.</strong> ${fmtNum(o.rate1 * 100, 2)}% versus ${fmtNum(o.rate2 * 100, 2)}% is within normal variation (p=${pTxt(o.pValue)}), so the saving does not appear to have cost you reliability.</p>`;
+
+  const rows = f.perTool
+    .map((t) => {
+      const status = t.skipped || !t.significant ? 'neutral' : t.direction === 'up' ? 'bad' : 'good';
+      const verdict = t.skipped
+        ? '<span class="muted">too few calls</span>'
+        : t.significant
+          ? `${STATUS_GLYPH[status]} ${t.direction === 'up' ? 'worse' : 'better'} (p=${pTxt(t.pValue)})`
+          : '<span class="muted">no real change</span>';
+      return `<tr>
+        <td>${esc(t.tool)}</td>
+        <td class="num">${fmtRate(t.rate1)}</td>
+        <td class="num">${fmtRate(t.rate2)}</td>
+        <td class="num">${fmtInt(t.compErrors)} / ${fmtInt(t.compCalls)}</td>
+        <td class="num delta-${status}">${verdict}</td>
+      </tr>`;
+    })
+    .join('');
+
+  return `${headline}
+  <table>
+    <thead><tr><th>Tool</th><th class="num">Baseline error rate</th><th class="num">New error rate</th><th class="num">Errors / calls now</th><th class="num">Verdict</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" class="muted">no tool data on both sides</td></tr>'}</tbody>
+  </table>
+  <div class="explainer">
+    <h3>Why this is the only quality number here</h3>
+    <p>Everything else on this page measures <strong>what you spent</strong>. Nothing in a Claude Code transcript records whether the answer was <em>right</em> &mdash; whether a spec passed review, whether the code worked, whether anyone had to redo it. Tool failure rate is the closest available proxy, and it only catches a narrow class of problem: calls that came back an error.</p>
+    <p>To actually answer &ldquo;did it get better?&rdquo; you need an outcome signal this tool cannot see &mdash; review rejections, rework counts, test or CI pass rates, regenerations per artifact. Once you have one, the number worth tracking is <strong>cost per accepted piece of work</strong>, not cost per request: a run that is 20% cheaper but needs one artifact in six redone has not improved.</p>
+  </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Per-job like-for-like
+// ---------------------------------------------------------------------------
+
+function agentTypeSection(cmp) {
+  const ins = cmp.insights;
+  const o = ins.overlap;
+  const rows = ins.agentTypes ?? [];
+
+  const overlapNote = !o
+    ? ''
+    : o.comparable
+      ? `<p class="callout callout-ok"><strong>The two windows ran comparable work.</strong> ${fmtNum(o.overlapPct, 0)}% of new requests use an agent type that also appears at baseline (${fmtInt(o.sharedTypes)} of ${fmtInt(o.compTypes)} types), so the headline is a reasonable before/after.</p>`
+      : `<p class="callout callout-warn"><strong>These two windows are largely different work.</strong> Your baseline ran ${fmtInt(o.baseTypes)} agent types and this window ran ${fmtInt(o.compTypes)}, sharing only ${fmtInt(o.sharedTypes)}. Just ${fmtNum(o.overlapPct, 0)}% of new requests run a job that also existed at baseline. The overall cost figure is therefore not a controlled before/after &mdash; the table below is, because each row compares one job against itself.</p>`;
+
+  const body = rows.length
+    ? `<table>
+      <thead><tr><th>Job (agent type)</th><th class="num">Baseline requests</th><th class="num">New requests</th><th class="num">Baseline tokens/request</th><th class="num">New tokens/request</th><th class="num">Change</th></tr></thead>
+      <tbody>${rows
+        .map((r) => {
+          const status = r.pctChange === null ? 'neutral' : Math.abs(r.pctChange) < 2 ? 'neutral' : r.pctChange < 0 ? 'good' : 'bad';
+          const thin = r.compRequests < 50;
+          return `<tr>
+          <td>${esc(r.agentType)}${thin ? ' ' + badge('small sample', 'warn') : ''}</td>
+          <td class="num">${fmtInt(r.baseRequests)}</td>
+          <td class="num">${fmtInt(r.compRequests)}</td>
+          <td class="num">${fmtInt(r.baseTokensPerRequest)}</td>
+          <td class="num">${fmtInt(r.compTokensPerRequest)}</td>
+          <td class="num delta-${status}">${STATUS_GLYPH[status]} ${esc(fmtPct(r.pctChange))}</td>
+        </tr>`;
+        })
+        .join('')}</tbody>
+    </table>
+    <p class="muted">Shown in tokens rather than dollars: the stored breakdown records no model attribution per agent type, so a per-job dollar figure would need a model mix this data cannot supply. Only jobs with at least 20 requests in the new window are listed.</p>`
+    : `<p class="callout callout-warn"><strong>No job ran enough in both windows to compare.</strong> Nothing here appears at baseline and again since, with enough volume to be meaningful. To measure a specific campaign, re-run it and compare it against its own baseline figures.</p>`;
+
+  return `${overlapNote}${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -564,12 +670,20 @@ function baselineStanding(reportData) {
 
 function methodExplainer(reportData) {
   const m = reportData.cost.model;
+  // 'flat' means at least one side lacked the cache-write TTL breakdown, so both were priced
+  // with the conservative multiplier. Disclosed rather than silently applied.
+  const ttlMode = reportData.comparison?.ttlMode ?? reportData.cost.ttlMode ?? 'flat';
   return `<div class="explainer">
     <h3>Why rates, not totals</h3>
     <p>A baseline covers everything on disk (often a month); a compare covers only what happened since. Comparing those totals directly would just tell you which window was longer. So every headline figure is a <strong>rate</strong> &mdash; per request, per session, per active hour &mdash; which stays comparable no matter how long each window ran.</p>
 
     <h3>How the cost estimate is built</h3>
-    <p>Each token is priced by its class and the model that produced it, using published Claude API list rates: cache reads at <strong>${m.cacheReadMultiplier}&times;</strong> the model&rsquo;s input rate, cache writes at <strong>${m.cacheWriteMultiplier}&times;</strong>, and output at that model&rsquo;s own output rate. The price table is frozen (version <code>${esc(m.priceTableVersion)}</code>) and identical on both sides of every comparison &mdash; otherwise a price change by Anthropic would show up as your efficiency win.</p>
+    <p>Each token is priced by its class and the model that produced it, using published Claude API list rates: cache reads at <strong>${m.cacheReadMultiplier}&times;</strong> the model&rsquo;s input rate, output at that model&rsquo;s own output rate, and cache writes by how long they were held &mdash; <strong>${m.cacheWrite5mMultiplier}&times;</strong> for a 5-minute cache and <strong>${m.cacheWrite1hMultiplier}&times;</strong> for a 1-hour one. The price table is frozen (version <code>${esc(m.priceTableVersion)}</code>) and identical on both sides of every comparison &mdash; otherwise a price change by Anthropic would show up as your efficiency win.</p>
+    ${
+      ttlMode === 'flat'
+        ? `<p class="callout callout-info"><strong>Cache writes here are costed at the flat ${m.cacheWriteFallbackMultiplier}&times; rate.</strong> The 5-minute/1-hour breakdown is missing from at least one side of this comparison, and pricing one side exactly while the other is estimated would show up as a cost change that is really just a change in measurement. Both sides therefore use the cheaper flat rate, which understates true spend a little &mdash; on this corpus, by roughly 2.5%. Re-run <code>--baseline</code> to capture the breakdown and both sides will price exactly.</p>`
+        : `<p class="callout callout-ok"><strong>Cache writes are costed exactly.</strong> Both sides of this comparison record the 5-minute/1-hour split, so 1-hour cache writes are billed at ${m.cacheWrite1hMultiplier}&times; rather than assumed to be the cheaper 5-minute kind.</p>`
+    }
     <p class="callout callout-warn"><strong>This is an estimate, not your bill.</strong> Claude Code transcripts contain no billing signal, and on a subscription plan you are not charged per token at all. Treat the dollar figures as a consistently-weighted way to compare two periods against each other, not as an amount anybody invoiced you.${reportData.cost.unpricedRequests ? ` ${fmtInt(reportData.cost.unpricedRequests)} request(s) ran on a model with no entry in the price table and were costed at the Opus tier.` : ''}</p>
 
     <h3>What &ldquo;statistically significant&rdquo; means here</h3>
@@ -639,6 +753,9 @@ const STYLE = `
   .hero-caption { color: var(--muted); font-size: 0.88rem; margin-top: 0.5rem; }
   .verdict-answer { font-size: 1.08rem; margin-top: 0; }
   .sig { font-size: 0.88rem; color: var(--muted); border-top: 1px solid var(--border); padding-top: 0.6rem; margin-bottom: 0; }
+  .quality-warn { font-size: 0.9rem; background: var(--warn-bg); border-radius: 8px; padding: 0.7rem 0.9rem; margin: 0.75rem 0 0; }
+  .verdict-warn { border-left-color: var(--warn); }
+  .verdict-warn .hero-number { color: var(--warn); }
 
   /* Findings */
   .findings { list-style: none; padding: 0; margin: 1rem 0; display: grid; gap: 0.65rem; }
@@ -781,6 +898,12 @@ export function renderHtmlReport(reportData) {
   })}
   ${section('Where the change came from', decompositionSection(cmp.decomposition), {
     lede: 'Splitting the change in cost per request into the things that actually caused it. Bars below the line saved you money; bars above it cost you money.',
+  })}
+  ${section('Did it actually get better, or just cheaper?', qualitySection(cmp), {
+    lede: 'Cost tells you what you spent, not whether the work was any good. This is the only quality signal the transcripts carry.',
+  })}
+  ${section('Like-for-like, job by job', agentTypeSection(cmp), {
+    lede: 'Each row is one agent type compared against itself. This is the closest this data gets to &ldquo;did that specific campaign improve?&rdquo;',
   })}
   ${section('Like-for-like, model by model', modelComparisonSection(cmp), {
     lede: 'The honesty check. An overall improvement can be manufactured simply by running more work on a cheaper model, so this section compares each model only against itself.',

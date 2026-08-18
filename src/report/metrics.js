@@ -1,21 +1,38 @@
 import { buildDistributionSummary } from '../stats/distribution.js';
 import { compareDistributions } from '../stats/compare.js';
 import { tokensPerRequest, tokensPerSession, tokensPerActiveHour } from '../stats/rates.js';
-import { estimateCostByModel, COST_MODEL_NOTES } from './cost.js';
+import { estimateCostByModel, COST_MODEL_NOTES, byModelHasTtlSplit } from './cost.js';
 import { perRequestProfile, decomposeCostChange, buildInsights } from './insights.js';
 
 const TIERS = ['main', 'subagent', 'workflow-agent'];
 
 function sumTokenClasses(records) {
   const totals = { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 };
+  // Tracked separately from the aggregate so the cost model can bill 1h cache writes at 2x instead
+  // of 1.25x. `ttlSplitComplete` stays true only while every record reported a breakdown - a partial
+  // split would silently under-bill the records that lack one.
+  let cc5 = 0;
+  let cc1h = 0;
+  let ttlSplitComplete = records.length > 0;
   for (const r of records) {
     totals.inputTokens += r.usage.inputTokens;
     totals.outputTokens += r.usage.outputTokens;
     totals.cacheCreationTokens += r.usage.cacheCreationTokens;
     totals.cacheReadTokens += r.usage.cacheReadTokens;
+    if (r.usage.cacheCreation5mTokens === null || r.usage.cacheCreation1hTokens === null) {
+      ttlSplitComplete = false;
+    } else {
+      cc5 += r.usage.cacheCreation5mTokens;
+      cc1h += r.usage.cacheCreation1hTokens;
+    }
   }
   const total = totals.inputTokens + totals.outputTokens + totals.cacheCreationTokens + totals.cacheReadTokens;
-  return { ...totals, total };
+  return {
+    ...totals,
+    total,
+    cacheCreation5mTokens: ttlSplitComplete ? cc5 : null,
+    cacheCreation1hTokens: ttlSplitComplete ? cc1h : null,
+  };
 }
 
 function tokenShare(totals) {
@@ -165,12 +182,19 @@ export function buildReportData({
     // The baseline's own report JSON already carries everything needed to re-derive its cost profile
     // (totals + byModel), so a compare can be enriched against a baseline captured by an older
     // version of this tool without rescanning or re-baselining.
+    // Both sides must be priced with the same cache-write rules. A baseline captured before the TTL
+    // split was recorded has no 5m/1h breakdown, so pricing this window exactly against it would
+    // show a ~2.5% cost rise that is purely a change in metering, not in behaviour.
+    const ttlMode =
+      byModelHasTtlSplit(byModel) && byModelHasTtlSplit(baselineReportData.byModel) ? 'exact' : 'flat';
+
     const baselineProfile = perRequestProfile(
       baselineReportData.totals.tokens,
       baselineReportData.totals.requests,
-      baselineReportData.byModel
+      baselineReportData.byModel,
+      { ttlMode }
     );
-    const compareProfile = perRequestProfile(totals, records.length, byModel);
+    const compareProfile = perRequestProfile(totals, records.length, byModel, { ttlMode });
 
     // The decomposition is computed first so the insight text can be like-for-like aware: an
     // aggregate metric and its per-model equivalent can point in opposite directions when the
@@ -192,7 +216,10 @@ export function buildReportData({
         compCompaction: buildCompactionSummary(scanResult.compactionEvents),
         baseToolPayload: baselineReportData.toolPayload,
         compToolPayload: buildToolPayloadTable(scanResult.toolPayloadStats),
+        baseByAgentType: baselineReportData.byAgentType,
+        compByAgentType: byAgentType,
       }),
+      ttlMode,
     };
   }
 

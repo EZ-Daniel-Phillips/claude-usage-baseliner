@@ -7,9 +7,18 @@
 // Every finding carries a `meaning` - not what the number is, but what it tells you and what you'd
 // do about it.
 
-import { contextTokens, cacheHitRate, estimateCostByModel, mixAdjustedCostPerRequest, priceFor } from './cost.js';
+import {
+  contextTokens,
+  cacheHitRate,
+  estimateCostByModel,
+  mixAdjustedCostPerRequest,
+  priceFor,
+  byModelHasTtlSplit,
+} from './cost.js';
+import { twoProportionTest } from '../stats/proportion.js';
 
-const CACHE_WRITE_MULTIPLIER = 1.25;
+const CACHE_WRITE_5M_MULTIPLIER = 1.25;
+const CACHE_WRITE_1H_MULTIPLIER = 2.0;
 const CACHE_READ_MULTIPLIER = 0.1;
 
 function pctChange(from, to) {
@@ -29,21 +38,34 @@ function ratesForModel(model) {
   return {
     inputTokens: input,
     outputTokens: price.output / 1e6,
-    cacheCreationTokens: input * CACHE_WRITE_MULTIPLIER,
+    cacheCreationTokens: input * CACHE_WRITE_5M_MULTIPLIER,
+    cacheCreation5mTokens: input * CACHE_WRITE_5M_MULTIPLIER,
+    cacheCreation1hTokens: input * CACHE_WRITE_1H_MULTIPLIER,
     cacheReadTokens: input * CACHE_READ_MULTIPLIER,
   };
 }
 
+// The decomposition must use exactly the token classes the cost model billed, or its terms stop
+// summing to the observed change. In exact mode cache writes are two separately-priced classes; in
+// flat mode they are one.
+function decompositionClasses(ttlMode) {
+  return ttlMode === 'exact'
+    ? ['cacheReadTokens', 'cacheCreation5mTokens', 'cacheCreation1hTokens', 'inputTokens', 'outputTokens']
+    : ['cacheReadTokens', 'cacheCreationTokens', 'inputTokens', 'outputTokens'];
+}
+
 // Per-request token counts by class, plus the derived aggregates the report headlines.
-export function perRequestProfile(totals, requests, byModel) {
+export function perRequestProfile(totals, requests, byModel, { ttlMode = 'exact' } = {}) {
   const t = totals;
-  const costing = estimateCostByModel(byModel);
+  const costing = estimateCostByModel(byModel, { ttlMode });
   return {
     requests,
     cost: costing.total,
     costPerRequest: safeDiv(costing.total, requests),
     perModel: costing.perModel,
     unpricedRequests: costing.unpricedRequests,
+    ttlMode: costing.ttlMode,
+    ttlSplitAvailable: costing.ttlSplitAvailable,
     tokensPerRequest: safeDiv(t.total, requests),
     contextPerRequest: safeDiv(contextTokens(t), requests),
     outputPerRequest: safeDiv(t.outputTokens, requests),
@@ -83,7 +105,8 @@ export function decomposeCostChange(base, comp) {
   if (!baseReq) return null;
 
   const compByModel = new Map(comp.perModel.map((m) => [m.model, m]));
-  const classes = ['cacheReadTokens', 'cacheCreationTokens', 'inputTokens', 'outputTokens'];
+  const ttlMode = base.ttlMode === 'exact' && comp.ttlMode === 'exact' ? 'exact' : 'flat';
+  const classes = decompositionClasses(ttlMode);
   const efficiency = Object.fromEntries(classes.map((c) => [c, 0]));
 
   for (const b of base.perModel) {
@@ -92,9 +115,13 @@ export function decomposeCostChange(base, comp) {
     const shareBase = b.requests / baseReq;
     const rates = ratesForModel(b.model);
     for (const cls of classes) {
-      const qBase = b.tokens[cls] / b.requests;
-      const qComp = c.tokens[cls] / c.requests;
-      efficiency[cls] += shareBase * (qComp - qBase) * rates[cls];
+      // A class missing on either side would poison the whole decomposition with NaN and silently
+      // break reconciliation, so treat absent counts as zero contribution rather than trusting the
+      // mode negotiation alone.
+      const qBase = (b.tokens[cls] ?? 0) / b.requests;
+      const qComp = (c.tokens[cls] ?? 0) / c.requests;
+      const term = shareBase * (qComp - qBase) * rates[cls];
+      if (Number.isFinite(term)) efficiency[cls] += term;
     }
   }
 
@@ -119,7 +146,11 @@ export function decomposeCostChange(base, comp) {
       {
         key: 'freshContext',
         label: 'Fresh context',
-        value: efficiency.cacheCreationTokens + efficiency.inputTokens,
+        value:
+          (efficiency.cacheCreationTokens ?? 0) +
+          (efficiency.cacheCreation5mTokens ?? 0) +
+          (efficiency.cacheCreation1hTokens ?? 0) +
+          efficiency.inputTokens,
         meaning:
           'New material written into the cache, plus anything read at full price. Rises when your prompt prefix keeps changing and the cache has to be rebuilt.',
       },
@@ -139,6 +170,104 @@ export function decomposeCostChange(base, comp) {
       },
     ],
   };
+}
+
+// Tool failure rate - the only outcome-shaped signal transcripts carry.
+//
+// Cost is an INPUT metric: it says what was spent, never whether the work was any good. A setup
+// change that strips context can cut cost while making Claude guess at file paths and stale line
+// numbers, which surfaces here as rising Read/Bash failures. Without this, a report can call that a
+// clean win.
+export function toolFailureRate(baseToolPayload, compToolPayload) {
+  const sum = (rows, f) => (rows ?? []).reduce((a, t) => a + f(t), 0);
+  const baseErrors = sum(baseToolPayload, (t) => t.errors);
+  const baseCalls = sum(baseToolPayload, (t) => t.calls);
+  const compErrors = sum(compToolPayload, (t) => t.errors);
+  const compCalls = sum(compToolPayload, (t) => t.calls);
+
+  const overall = twoProportionTest(baseErrors, baseCalls, compErrors, compCalls);
+
+  const baseByTool = new Map((baseToolPayload ?? []).map((t) => [t.tool, t]));
+  const perTool = [];
+  for (const t of compToolPayload ?? []) {
+    const b = baseByTool.get(t.tool);
+    if (!b) continue;
+    const test = twoProportionTest(b.errors, b.calls, t.errors, t.calls);
+    perTool.push({
+      tool: t.tool,
+      baseErrors: b.errors,
+      baseCalls: b.calls,
+      compErrors: t.errors,
+      compCalls: t.calls,
+      ...test,
+    });
+  }
+  // Worst regressions first, then everything else by call volume.
+  perTool.sort((a, b) => {
+    const aReg = !a.skipped && a.significant && a.direction === 'up' ? 1 : 0;
+    const bReg = !b.skipped && b.significant && b.direction === 'up' ? 1 : 0;
+    if (aReg !== bReg) return bReg - aReg;
+    return b.compCalls - a.compCalls;
+  });
+
+  return { overall, perTool, baseErrors, baseCalls, compErrors, compCalls };
+}
+
+// How much of the new window's work is the same KIND of work as the baseline's.
+//
+// Cost per request is only a like-for-like measure if the two windows ran comparable jobs. When the
+// agent types barely overlap, the headline is comparing different work and must not be presented as
+// a verdict on a change.
+export function workloadOverlap(baseByAgentType, compByAgentType) {
+  const base = new Map((baseByAgentType ?? []).map((a) => [a.key, a]));
+  const comp = compByAgentType ?? [];
+  const compRequests = comp.reduce((a, x) => a + x.requests, 0);
+  if (!compRequests) return null;
+
+  const sharedKeys = comp.filter((a) => base.has(a.key)).map((a) => a.key);
+  const sharedRequests = comp.filter((a) => base.has(a.key)).reduce((a, x) => a + x.requests, 0);
+  const overlapPct = (sharedRequests / compRequests) * 100;
+
+  return {
+    baseTypes: base.size,
+    compTypes: comp.length,
+    sharedTypes: sharedKeys.length,
+    compRequests,
+    sharedRequests,
+    overlapPct,
+    // Below this, the two windows are substantially different work and the headline is not a
+    // controlled before/after.
+    comparable: overlapPct >= 60,
+  };
+}
+
+// Per-agent-type before/after, restricted to types present in BOTH windows.
+//
+// This is the closest thing to "did this specific campaign get better", because an agent type names
+// a job rather than a model. Reported in tokens rather than dollars: the stored breakdown carries no
+// model attribution per agent type, so a per-agent dollar figure would need a model mix this data
+// cannot supply.
+export function agentTypeComparison(baseByAgentType, compByAgentType, { minRequests = 20 } = {}) {
+  const base = new Map((baseByAgentType ?? []).map((a) => [a.key, a]));
+  const rows = [];
+  for (const c of compByAgentType ?? []) {
+    const b = base.get(c.key);
+    if (!b || c.requests < minRequests || !b.requests) continue;
+    const bt = b.tokens.total / b.requests;
+    const ct = c.tokens.total / c.requests;
+    rows.push({
+      agentType: c.key,
+      baseRequests: b.requests,
+      compRequests: c.requests,
+      baseTokensPerRequest: bt,
+      compTokensPerRequest: ct,
+      pctChange: pctChange(bt, ct),
+      baseOutputPerRequest: b.tokens.outputTokens / b.requests,
+      compOutputPerRequest: c.tokens.outputTokens / c.requests,
+    });
+  }
+  rows.sort((a, b) => b.compRequests - a.compRequests);
+  return rows;
 }
 
 // How far the split of work across models moved, as total variation distance in percentage points.
@@ -206,13 +335,29 @@ const KPI_MEANINGS = {
     'How much Claude writes back per request. Output is the priciest token class, so trimming verbosity or dropping reasoning effort shows up here first.',
   cacheHitRate:
     'The share of re-read context that came from cache at a tenth of the price, instead of being paid for in full. This should sit very high. A fall means something is changing near the start of your prompt and forcing the cache to be rebuilt.',
+  toolFailureRate:
+    'The share of tool calls that came back an error. This is the only quality signal in the data - everything else on this page measures what you spent, not whether the work was any good. If this rises while cost falls, you have bought the saving with more mistakes and retries.',
   tokensPerRequest:
     'Raw token count with every class weighted the same. Shown for continuity only - it is roughly 96% cache reads, so it understates changes that matter and overstates ones that do not. Prefer cost per request.',
 };
 
 // Builds the ordered list of headline findings for a compare report.
-export function buildInsights({ base, comp, comparison, decomposition, baseCompaction, compCompaction, baseToolPayload, compToolPayload }) {
+export function buildInsights({
+  base,
+  comp,
+  comparison,
+  decomposition,
+  baseCompaction,
+  compCompaction,
+  baseToolPayload,
+  compToolPayload,
+  baseByAgentType,
+  compByAgentType,
+}) {
   const findings = [];
+  const failure = toolFailureRate(baseToolPayload, compToolPayload);
+  const overlap = workloadOverlap(baseByAgentType, compByAgentType);
+  const agentTypes = agentTypeComparison(baseByAgentType, compByAgentType);
 
   const costDelta = pctChange(base.costPerRequest, comp.costPerRequest);
   const contextDelta = pctChange(base.contextPerRequest, comp.contextPerRequest);
@@ -223,6 +368,14 @@ export function buildInsights({ base, comp, comparison, decomposition, baseCompa
   const mix = modelMixShift(base.perModel, comp.perModel);
   const adjusted = mixAdjustedCostPerRequest(base.perModel, comp.perModel);
   const adjustedDelta = adjusted ? pctChange(adjusted.baselineWeighted, adjusted.adjustedWeighted) : null;
+
+  if (overlap && !overlap.comparable) {
+    findings.push({
+      status: 'warn',
+      title: `Only ${overlap.overlapPct.toFixed(0)}% of the new work is the same kind of work as your baseline`,
+      meaning: `Your baseline ran ${overlap.baseTypes} agent types; this window ran ${overlap.compTypes}, of which ${overlap.sharedTypes} also appear at baseline. Cost per request is only a fair before/after when both windows are doing comparable jobs, so treat the headline as a rough indication and rely on the per-job table below, which compares each agent type only against itself. To judge a specific campaign, re-run it and compare it against its own baseline rows.`,
+    });
+  }
 
   if (costDelta !== null) {
     const better = costDelta < 0;
@@ -353,6 +506,33 @@ export function buildInsights({ base, comp, comparison, decomposition, baseCompa
     }
   }
 
+  // Quality guardrail. A cost saving bought with a higher failure rate is not a success, and the
+  // report must not present it as one.
+  const f = failure.overall;
+  let qualityWarning = null;
+  if (!f.skipped && f.significant && f.direction === 'up') {
+    const worstTools = failure.perTool
+      .filter((t) => !t.skipped && t.significant && t.direction === 'up')
+      .map((t) => `${t.tool} ${(t.rate1 * 100).toFixed(1)}%→${(t.rate2 * 100).toFixed(1)}%`);
+    qualityWarning = {
+      severity: costDelta !== null && costDelta < 0 ? 'cheaper-but-worse' : 'worse',
+      text: `Tool calls now fail more often: ${(f.rate1 * 100).toFixed(2)}% → ${(f.rate2 * 100).toFixed(2)}% of calls returned an error (p=${f.pValue < 0.001 ? '<0.001' : f.pValue.toFixed(3)}).${worstTools.length ? ` Driven by ${worstTools.join(', ')}.` : ''}`,
+    };
+    findings.push({
+      status: 'bad',
+      title: `Tool calls fail more often than they used to`,
+      meaning: `${(f.rate1 * 100).toFixed(2)}% of tool calls returned an error at baseline, versus ${(f.rate2 * 100).toFixed(2)}% now, across ${failure.compCalls.toLocaleString('en-US')} calls - a real change, not noise. ${
+        worstTools.length ? `Worst affected: ${worstTools.join(', ')}. ` : ''
+      }Rising Read and Bash failures alongside shrinking context is the signature of trimming too far: with less context Claude works from stale paths and line numbers and has to retry. Retries cost tokens too, so this can quietly eat the saving as well as the quality.`,
+    });
+  } else if (!f.skipped && f.significant && f.direction === 'down') {
+    findings.push({
+      status: 'good',
+      title: `Tool calls fail less often`,
+      meaning: `Tool error rate fell from ${(f.rate1 * 100).toFixed(2)}% to ${(f.rate2 * 100).toFixed(2)}% of calls. Fewer failed calls means fewer retries, which is both a quality and a cost win.`,
+    });
+  }
+
   const significance = significanceEnglish(comparison?.distributions?.tokensPerRequest?.mannWhitney);
 
   return {
@@ -360,6 +540,10 @@ export function buildInsights({ base, comp, comparison, decomposition, baseCompa
     significance,
     mix,
     adjustedDelta,
+    failure,
+    overlap,
+    agentTypes,
+    qualityWarning,
     deltas: { costDelta, contextDelta, outputDelta, cacheDelta },
     kpis: [
       kpi('Cost per request', base.costPerRequest, comp.costPerRequest, usd, true, KPI_MEANINGS.costPerRequest),
@@ -368,6 +552,14 @@ export function buildInsights({ base, comp, comparison, decomposition, baseCompa
       // Null-safe: a window with no context tokens at all has no hit rate. Multiplying null by 100
       // would silently yield 0 and render as a false "-100%" regression.
       kpi('Cache hit rate', asPercent(base.cacheHitRate), asPercent(comp.cacheHitRate), (v) => (v === null ? 'n/a' : `${v.toFixed(1)}%`), false, KPI_MEANINGS.cacheHitRate),
+      kpi(
+        'Tool failure rate',
+        f.rate1 === null ? null : f.rate1 * 100,
+        f.rate2 === null ? null : f.rate2 * 100,
+        (v) => (v === null ? 'n/a' : `${v.toFixed(2)}%`),
+        true,
+        KPI_MEANINGS.toolFailureRate
+      ),
       kpi('Raw tokens per request', base.tokensPerRequest, comp.tokensPerRequest, tok, true, KPI_MEANINGS.tokensPerRequest),
     ],
   };
