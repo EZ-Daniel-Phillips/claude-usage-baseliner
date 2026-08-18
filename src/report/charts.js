@@ -142,11 +142,17 @@ export function distributionChart(series, { width = 860, height = 300, xLabel = 
     .map((s) => s.sorted.filter((v) => v > xMax).length)
     .reduce((a, b) => a + b, 0);
 
+  // Say plainly when a curve is drawn from a subset - "n=5,000" beside a 71,544-request period
+  // otherwise reads as the period only having 5,000 requests in it.
   const legend = withDensity
-    .map(
-      (s) =>
-        `<span class="legend-item"><span class="swatch" style="background:var(--${s.colorVar})"></span>${esc(s.label)} <span class="muted">(n=${s.sorted.length.toLocaleString('en-US')})</span></span>`
-    )
+    .map((s) => {
+      const drawn = s.sorted.length;
+      const note =
+        s.totalN && s.totalN > drawn
+          ? `${drawn.toLocaleString('en-US')} sampled from ${s.totalN.toLocaleString('en-US')} requests`
+          : `all ${drawn.toLocaleString('en-US')} requests`;
+      return `<span class="legend-item"><span class="swatch" style="background:var(--${s.colorVar})"></span>${esc(s.label)} <span class="muted">(${note})</span></span>`;
+    })
     .join('');
 
   return `<figure class="chart">
