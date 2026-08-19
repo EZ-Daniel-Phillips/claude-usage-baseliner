@@ -5,6 +5,7 @@
 
 import { STYLE } from './html.js';
 import { horizontalBars, stackedShareBar, timeSeriesBars, hourOfDayChart, fmtCompact } from './charts.js';
+import { BUSINESS_HOUR_START, BUSINESS_HOUR_END } from './activityMetrics.js';
 
 function esc(str) {
   if (str === null || str === undefined) return '';
@@ -77,7 +78,11 @@ function headlineKpis(rd) {
     kpiCard('Commits run', fmtInt(rd.git.commits), 'Bash calls matching `git commit`, seen in transcripts still on disk.'),
     kpiCard('Worktrees created', fmtInt(Math.max(rd.worktrees.createdViaTool, rd.worktrees.projectTraceCount)), 'Distinct worktrees Claude Code created for you (EnterWorktree tool calls, cross-checked against project directory traces).'),
     kpiCard('Lines written or edited', fmtInt(rd.code.linesWritten + rd.code.editLinesAdded), 'Write-tool file content plus Edit-tool replacement text, in transcripts still on disk. An estimate, not a diff.'),
-    kpiCard('Pull requests raised', rd.github.prs ? fmtInt(rd.github.prs.total) : fmtInt(rd.github.prCreateCommands), rd.github.prs ? 'Distinct PR URLs Claude Code has status-checked for you.' : '`gh pr create` invocations seen in transcripts still on disk.'),
+    kpiCard(
+      'Pull requests raised (at least)',
+      fmtInt(Math.max(rd.github.prs?.total ?? 0, rd.github.prCreateCommands)),
+      'The larger of two undercounts: PR URLs still sitting in the gh status-poll cache (a small rolling cache, not a full ledger - see Pull requests below) versus `gh pr create` invocations seen in transcripts still on disk. Both miss PRs raised outside Claude Code or before either source’s window.'
+    ),
     kpiCard('Reviews submitted', fmtInt(rd.github.prReviewCommands), '`gh pr review` invocations - PRs you (via Claude) reviewed, not ones you raised.'),
   ];
   return `<div class="kpi-grid">${cards.join('')}</div>`;
@@ -121,8 +126,8 @@ function steadinessSection(rd) {
   ${timeSeriesBars(dailyRows, { valueLabel: 'messages per day' })}
   <p class="muted">One bar per day that had any recorded activity (${dailyRows.length} days). Gaps in the axis are days with zero activity, not zero-height bars.</p>
   <h3>What hour of day work happens</h3>
-  ${hourOfDayChart(hod.hours)}
-  <p class="muted">${fmtNum(hod.businessHoursSharePct, 1)}% of all recorded activity fell inside a conventional 08:00&ndash;18:00 workday.</p>`;
+  ${hourOfDayChart(hod.hours, { businessStart: BUSINESS_HOUR_START, businessEnd: BUSINESS_HOUR_END })}
+  <p class="muted">${fmtNum(hod.businessHoursSharePct, 1)}% of all recorded activity fell inside a conventional 09:00&ndash;17:00 workday.</p>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +199,8 @@ function prSection(rd) {
     kpiCard('`gh pr comment`', fmtInt(gh.prCommentCommands), 'PR comments posted via the gh CLI.'),
   ];
 
+  const cacheCaveat = `<p class="callout callout-warn"><strong>This undercounts your real PR history.</strong> <code>gh-pr-status-cache.json</code> is the small rolling cache Claude Code's status line polls for PR checks/review state - it holds whichever PRs were recently checked, not a running ledger of every PR you have ever raised, and older entries fall out of it as new ones are checked. Treat every count below as a floor, not a total. The <code>gh pr create</code>/<code>gh pr review</code> counts above are a separate, likely more complete (but still transcript-window-limited) signal.</p>`;
+
   if (!prs) {
     return `<div class="kpi-grid">${cmdCards.join('')}</div>
     <p class="callout callout-warn">No <code>gh-pr-status-cache.json</code> found, so PR state, review outcome and lines-changed detail below are unavailable on this machine. The gh-CLI command counts above still come from transcripts.</p>`;
@@ -205,7 +212,8 @@ function prSection(rd) {
   const reviewRows = Object.entries(prs.byReview)
     .map(([review, count]) => `<tr><td>${esc(review === 'none' ? 'No review recorded' : review)}</td><td class="num">${fmtInt(count)}</td></tr>`)
     .join('');
-  const topRows = prs.top
+  const topRows = prs.all
+    .slice(0, 10)
     .map(
       (pr) => `<tr>
       <td>${pr.number ? `#${esc(pr.number)} ` : ''}${esc(pr.title ?? pr.url)}</td>
@@ -218,17 +226,18 @@ function prSection(rd) {
     .join('');
 
   return `<div class="kpi-grid">${cmdCards.join('')}</div>
+  ${cacheCaveat}
   <div class="kpi-grid">
-    ${kpiCard('PRs tracked', fmtInt(prs.total), 'Distinct PR URLs in the gh PR status cache - this is a personal status-poll cache, so it reflects PRs you have checked on, which in practice means ones you raised.')}
-    ${kpiCard('Lines changed across those PRs', `+${fmtInt(prs.additions)} / -${fmtInt(prs.deletions)}`, 'Additions and deletions as reported by GitHub for each tracked PR.')}
-    ${kpiCard('Received a review', fmtInt(prs.reviewedCount), 'Of the tracked PRs, how many have any review recorded against them.')}
+    ${kpiCard('PRs still in the cache', fmtInt(prs.total), 'Distinct PR URLs currently sitting in the gh PR status cache - a floor on PRs raised, not a total (see the warning above).')}
+    ${kpiCard('Lines changed across those PRs', `+${fmtInt(prs.additions)} / -${fmtInt(prs.deletions)}`, 'Additions and deletions as reported by GitHub for each cached PR.')}
+    ${kpiCard('Received a review', fmtInt(prs.reviewedCount), 'Of the cached PRs, how many have any review recorded against them.')}
   </div>
   <h3>By state</h3>
   <table><thead><tr><th>State</th><th class="num">Count</th></tr></thead><tbody>${stateRows}</tbody></table>
   <h3>By review outcome</h3>
   <table><thead><tr><th>Review</th><th class="num">Count</th></tr></thead><tbody>${reviewRows}</tbody></table>
-  <h3>Largest tracked PRs</h3>
-  <table><thead><tr><th>PR</th><th>State</th><th>Review</th><th class="num">Additions</th><th class="num">Deletions</th></tr></thead><tbody>${topRows || '<tr><td colspan="5" class="muted">none tracked</td></tr>'}</tbody></table>`;
+  <h3>Largest cached PRs</h3>
+  <table><thead><tr><th>PR</th><th>State</th><th>Review</th><th class="num">Additions</th><th class="num">Deletions</th></tr></thead><tbody>${topRows || '<tr><td colspan="5" class="muted">none cached</td></tr>'}</tbody></table>${prs.all.length > 10 ? `<p class="muted">Showing 10 of ${fmtInt(prs.all.length)} cached PRs.</p>` : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +256,7 @@ function codeSection(rd) {
 
 function toolsSection(rd) {
   const chart = rd.tools.topTools.length
-    ? horizontalBars(rd.tools.topTools.map((t) => ({ label: t.tool, value: t.calls, valueText: fmtInt(t.calls), colorVar: 'series-1' })))
+    ? horizontalBars(rd.tools.topTools.slice(0, 12).map((t) => ({ label: t.tool, value: t.calls, valueText: fmtInt(t.calls), colorVar: 'series-1' })))
     : '<p class="muted">No tool-call data.</p>';
   return `<div class="kpi-grid">
     ${kpiCard('Subagents spawned', fmtInt(rd.projects.subagentFiles), 'Task/Agent tool invocations that produced their own transcript file.')}
@@ -265,13 +274,26 @@ function toolsSection(rd) {
 // ---------------------------------------------------------------------------
 
 function methodSection(rd) {
+  const merged = Array.isArray(rd.sources) && rd.sources.length > 0;
   return `<div class="explainer">
     <h3>Where this data comes from</h3>
     <ul>
       <li><strong>All-time figures</strong> (sessions, messages, hour-of-day, daily activity, token totals) come from Claude Code's own <code>stats-cache.json</code>, last computed <strong>${esc(rd.period.lastComputedDate ?? 'unknown')}</strong>. It persists across transcript rotation, so it is the only source here with a history longer than about 30 days.</li>
-      <li><strong>Pull request figures</strong> come from <code>gh-pr-status-cache.json</code>, a status-poll cache keyed by PR URL. It only contains PRs that cache has ever checked the status of, so it is a floor, not a guaranteed complete count.</li>
-      <li><strong>Commits, pushes, worktrees, gh-CLI commands and lines written/edited</strong> come from a fresh read of every transcript file still on disk under <code>${esc(rd.claudeDir)}</code> (${fmtInt(rd.scan.filesScanned)} files this run). Local transcripts rotate after roughly 30 days, so these figures only cover recent activity even though the page is titled by the tool's full lifetime.</li>
+      <li><strong>Pull request figures</strong> come from <code>gh-pr-status-cache.json</code>, a small rolling status-poll cache keyed by PR URL - not a full ledger, so every PR figure is a floor, not a guaranteed complete count (see the warning in the Pull requests section).</li>
+      <li><strong>Commits, pushes, worktrees, gh-CLI commands and lines written/edited</strong> come from a fresh read of every transcript file still on disk${merged ? ' on each merged machine' : ` under <code>${esc(rd.claudeDir)}</code>`} (${fmtInt(rd.scan.filesScanned)} files total this run). Local transcripts rotate after roughly 30 days, so these figures only cover recent activity even though the page is titled by the tool's full lifetime.</li>
     </ul>
+    ${
+      merged
+        ? `<h3>How the merged sources were combined</h3>
+    <p>This report was built with <code>--merge</code> from ${fmtInt(rd.sources.length)} separate <code>--visualise</code> JSON reports (see the source table above). Figures were combined per field, not simply concatenated:</p>
+    <ul>
+      <li><strong>Summed</strong> (each source's activity is genuinely independent, so nothing here can double-count): sessions, messages, tokens, commits, pushes, gh-CLI command counts, lines written/edited, subagent/workflow counts, transcript files scanned.</li>
+      <li><strong>Recomputed from combined raw data</strong>, not averaged: daily activity is merged date-by-date before active-day coverage, streaks and gaps are recalculated; hour-of-day counts are summed per hour before percentages are recalculated. Averaging the already-derived percentages instead would have been wrong for anything path-dependent, like a streak that only exists because two machines' active days interleave.</li>
+      <li><strong>Deduplicated</strong>: pull requests are merged by URL (a PR checked from more than one machine is counted once; where sources disagree on its state, the most recently generated source wins), and distinct project/worktree names are unioned rather than summed.</li>
+      <li><strong>Approximate</strong>: the count of distinctly-named worktrees created via the EnterWorktree tool is summed across sources, which would overcount if the exact same worktree name was used on more than one machine.</li>
+    </ul>`
+        : ''
+    }
     <h3>What this page does not touch</h3>
     <p>This mode reads <code>stats-cache.json</code>, <code>gh-pr-status-cache.json</code> and the transcript corpus, and writes only its own JSON/HTML pair under <code>claude-usage-baseliner/visualise/</code>. It never reads or writes <code>state.json</code>, so it cannot move, consume or otherwise affect your <code>--baseline</code> reference point or any <code>--compare</code> window.</p>
     <h3>Dollar figures are estimates, not a bill</h3>
@@ -284,6 +306,8 @@ function methodSection(rd) {
 // ---------------------------------------------------------------------------
 
 export function renderVisualiseHtml(rd) {
+  const merged = Array.isArray(rd.sources) && rd.sources.length > 0;
+
   // Every value here is either already a safe fmt*/esc() result or genuine inline HTML (fmtWhen's
   // <span title>), so this renders each value as-is rather than escaping it a second time.
   const metaItems = [
@@ -291,15 +315,29 @@ export function renderVisualiseHtml(rd) {
     ['Usage cache since', rd.period.firstSessionDate ? fmtWhen(rd.period.firstSessionDate) : 'n/a'],
     ['Usage cache last computed', esc(rd.period.lastComputedDate ?? 'n/a')],
     ['Transcripts scanned', fmtInt(rd.scan.filesScanned)],
-    ['Scanned directory', esc(rd.claudeDir)],
+    [merged ? 'Merged from' : 'Scanned directory', merged ? `${fmtInt(rd.sources.length)} machine(s)` : esc(rd.claudeDir)],
   ];
+
+  const sourcesPanel = merged
+    ? `<div class="explainer">
+      <h3>Sources merged into this report</h3>
+      <table>
+        <thead><tr><th>Claude directory</th><th>Report generated</th><th class="num">Transcripts scanned</th></tr></thead>
+        <tbody>${rd.sources
+          .map((s) => `<tr><td>${esc(s.claudeDir)}</td><td>${fmtWhen(s.generatedAt)}</td><td class="num">${fmtInt(s.filesScanned)}</td></tr>`)
+          .join('')}</tbody>
+      </table>
+      <p class="muted">See &ldquo;How to read this page&rdquo; below for exactly how figures from each source were combined.</p>
+    </div>`
+    : '';
 
   const body = `<div class="wrap">
   <h1>What you did with Claude</h1>
-  <p class="lede">Everything this machine's Claude Code usage cache and local transcripts can tell you about how you have actually used it - independent of, and without affecting, your <code>--baseline</code>/<code>--compare</code> data.</p>
+  <p class="lede">${merged ? `Combined from ${fmtInt(rd.sources.length)} machines' ` : "Everything this machine's "}Claude Code usage cache and local transcripts can tell you about how you have actually used it - independent of, and without affecting, your <code>--baseline</code>/<code>--compare</code> data.</p>
   <div class="meta-grid">
     ${metaItems.map(([label, value]) => `<div class="meta-item"><div class="label">${esc(label)}</div><div class="value">${value}</div></div>`).join('')}
   </div>
+  ${sourcesPanel}
 
   ${section('At a glance', headlineKpis(rd))}
   ${section('How steady is your usage?', steadinessSection(rd), { lede: 'Claude Code is a CLI, not a server, so "uptime" here means presence: how many days you used it, and at what hours.' })}

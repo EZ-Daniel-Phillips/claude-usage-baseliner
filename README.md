@@ -77,6 +77,53 @@ Write/Edit tools, so they cannot see reverts, repeated rewrites of the same line
 outside Claude Code. Where a PR exists, its GitHub-computed additions/deletions are the more
 trustworthy figure.
 
+**PR figures are a floor, not a total.** `gh-pr-status-cache.json` is the small rolling cache Claude
+Code's status line polls for PR checks/review state, not a running ledger - older entries fall out of
+it as new ones are checked. If a report's pull-request count looks far lower than you know it should
+be, that cache is why; the `gh pr create`/`gh pr review` command counts (from transcripts, so also
+window-limited) are a separate, usually larger, signal shown alongside it.
+
+### `--merge`: combining data from more than one machine
+
+Each machine you use Claude Code on has its own `~/.claude`, so a single `--visualise` run only ever
+sees that machine's history. `--merge` combines two or more `--visualise` JSON reports - typically one
+dumped from each machine - into a single merged JSON+HTML report:
+
+```
+# On machine A:
+node bin/claude-usage-baseliner.js --visualise
+# -> ~/.claude/claude-usage-baseliner/visualise/visualise-<timestamp>.json
+
+# On machine B:
+node bin/claude-usage-baseliner.js --visualise
+# -> ~/.claude/claude-usage-baseliner/visualise/visualise-<timestamp>.json
+
+# Copy both JSON files to one machine, then:
+node bin/claude-usage-baseliner.js --merge \
+  --input machineA-visualise-<timestamp>.json \
+  --input machineB-visualise-<timestamp>.json
+```
+
+`--input` may be repeated any number of times (two or more required), including a previously merged
+report - merging a merge just extends its source list rather than nesting.
+
+Fields are combined by whichever rule is actually correct for what they measure, not uniformly summed
+or averaged:
+
+- **Summed** - each source's activity is genuinely independent, so nothing here can double-count:
+  sessions, messages, tokens, commits, pushes, gh-CLI command counts, lines written/edited,
+  subagent/workflow counts, transcript files scanned.
+- **Recomputed from combined raw data, not averaged** - daily activity is merged date-by-date before
+  active-day coverage, streaks and gaps are recalculated; hour-of-day counts are summed per hour
+  before percentages are recalculated.
+- **Deduplicated** - pull requests are merged by URL (a PR checked from more than one machine is
+  counted once; the most recently generated source wins on conflicting fields), and distinct
+  project/worktree names are unioned rather than summed.
+
+The merged report is rendered with the same HTML as a single-machine `--visualise` report, with an
+added panel listing every source it was built from. Like `--visualise` itself, `--merge` only reads
+the files named by `--input` and writes its own JSON+HTML pair - it never touches `state.json`.
+
 ## Reading the report
 
 The HTML report is built to answer one question directly: **did the change I made to my setup

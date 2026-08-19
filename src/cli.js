@@ -3,6 +3,7 @@ import { resolveConfig } from './config.js';
 import { runBaseline } from './commands/baselineCommand.js';
 import { runCompare, NoBaselineError } from './commands/compareCommand.js';
 import { runVisualise } from './commands/visualiseCommand.js';
+import { runMerge, MergeInputError } from './commands/mergeCommand.js';
 import { setVerbosity, error } from './util/log.js';
 
 const HELP = `claude-usage-baseliner
@@ -15,6 +16,7 @@ Usage:
   claude-usage-baseliner --baseline [options]
   claude-usage-baseliner --compare [options]
   claude-usage-baseliner --visualise [options]
+  claude-usage-baseliner --merge --input <path> --input <path> [--input <path> ...]
 
 Options:
   --baseline              Scan everything available and establish a fresh reference point.
@@ -23,6 +25,11 @@ Options:
                           history (sessions, uptime pattern, tokens, commits, worktrees, PRs, lines
                           written). Independent of --baseline/--compare: never reads or writes
                           state.json, and writes its own report under claude-usage-baseliner/visualise/.
+  --merge                 Combine two or more --visualise JSON reports (e.g. one dumped from each of
+                          several machines) into a single merged JSON+HTML report. Pass each file with
+                          its own --input.
+  --input <path>          A --visualise JSON report to fold into --merge. Repeat for each source
+                          machine; at least two are required.
   --since-last            With --compare, measure only what is new since the previous scan instead
                           of everything since the baseline. Consumes that window: the next run will
                           not see it again.
@@ -43,6 +50,8 @@ export async function main(argv) {
         baseline: { type: 'boolean' },
         compare: { type: 'boolean' },
         visualise: { type: 'boolean' },
+        merge: { type: 'boolean' },
+        input: { type: 'string', multiple: true },
         'since-last': { type: 'boolean' },
         'claude-dir': { type: 'string' },
         'min-n': { type: 'string' },
@@ -64,9 +73,9 @@ export async function main(argv) {
     return 0;
   }
 
-  const modes = ['baseline', 'compare', 'visualise'].filter((m) => parsed.values[m]);
+  const modes = ['baseline', 'compare', 'visualise', 'merge'].filter((m) => parsed.values[m]);
   if (modes.length !== 1) {
-    error('Exactly one of --baseline, --compare, or --visualise is required.');
+    error('Exactly one of --baseline, --compare, --visualise, or --merge is required.');
     console.log(HELP);
     return 1;
   }
@@ -79,12 +88,14 @@ export async function main(argv) {
       await runBaseline(config);
     } else if (parsed.values.compare) {
       await runCompare(config);
-    } else {
+    } else if (parsed.values.visualise) {
       await runVisualise(config);
+    } else {
+      await runMerge({ inputs: parsed.values.input });
     }
     return 0;
   } catch (e) {
-    if (e instanceof NoBaselineError) {
+    if (e instanceof NoBaselineError || e instanceof MergeInputError) {
       error(e.message);
       return 1;
     }

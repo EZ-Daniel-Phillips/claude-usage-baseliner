@@ -314,7 +314,7 @@ export function timeSeriesBars(rows, { width = 860, height = 220, valueLabel = '
 // ---------------------------------------------------------------------------
 // Hour-of-day bars (24 bars, when work actually happens across the day)
 // ---------------------------------------------------------------------------
-export function hourOfDayChart(hours, { width = 860, height = 200 } = {}) {
+export function hourOfDayChart(hours, { width = 860, height = 200, businessStart = 9, businessEnd = 17 } = {}) {
   if (!hours.length) return '<p class="muted">No data.</p>';
   const padL = 46;
   const padR = 10;
@@ -325,14 +325,15 @@ export function hourOfDayChart(hours, { width = 860, height = 200 } = {}) {
   const max = Math.max(...hours.map((h) => h.count)) || 1;
   const barW = plotW / hours.length - 3;
   const sy = (v) => padT + plotH - (v / max) * plotH;
+  const pad2 = (n) => String(n).padStart(2, '0');
 
   const bars = hours
     .map((h, i) => {
       const x = padL + i * (plotW / hours.length);
       const barH = Math.max(0.5, (h.count / max) * plotH);
-      const business = h.hour >= 8 && h.hour < 18;
+      const business = h.hour >= businessStart && h.hour < businessEnd;
       return `<g>
-        <rect class="${business ? 'bar-a' : 'bar-b'}" x="${x.toFixed(2)}" y="${sy(h.count).toFixed(1)}" width="${barW.toFixed(2)}" height="${barH.toFixed(1)}" rx="2"><title>${String(h.hour).padStart(2, '0')}:00 &ndash; ${fmtCompact(h.count)} tool/message events (${h.pct.toFixed(1)}%)</title></rect>
+        <rect class="${business ? 'bar-a' : 'bar-b'}" x="${x.toFixed(2)}" y="${sy(h.count).toFixed(1)}" width="${barW.toFixed(2)}" height="${barH.toFixed(1)}" rx="2"><title>${pad2(h.hour)}:00 &ndash; ${fmtCompact(h.count)} tool/message events (${h.pct.toFixed(1)}%)</title></rect>
         <text class="tick" x="${(x + barW / 2).toFixed(1)}" y="${padT + plotH + 14}" text-anchor="middle">${h.hour % 3 === 0 ? h.hour : ''}</text>
       </g>`;
     })
@@ -344,7 +345,7 @@ export function hourOfDayChart(hours, { width = 860, height = 200 } = {}) {
       <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}"/>
     </svg>
     <div class="legend">
-      <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Business hours (08:00&ndash;18:00)</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Business hours (${pad2(businessStart)}:00&ndash;${pad2(businessEnd)}:00)</span>
       <span class="legend-item"><span class="swatch" style="background:var(--series-2)"></span>Outside business hours</span>
     </div>
   </figure>`;

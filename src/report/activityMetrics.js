@@ -19,7 +19,11 @@ function daysBetween(aIso, bIso) {
 // Active-day coverage over the exact span the cache itself reports, plus the longest unbroken run
 // of active days and the longest silent gap - three different ways of answering "was this steady
 // daily use, or a handful of bursts", which a single percentage cannot distinguish on its own.
-function buildCoverage(dailyActivity) {
+//
+// Exported (along with buildHourOfDay/buildPrSummary below) so report/mergeActivity.js can recompute
+// these from combined raw data rather than trying to average two already-derived summaries, which
+// would be wrong for anything path-dependent (streaks, gaps, hour spread).
+export function buildCoverage(dailyActivity) {
   if (!dailyActivity.length) return null;
   const dates = [...new Set(dailyActivity.filter((d) => d.messageCount > 0 || d.sessionCount > 0).map((d) => d.date))].sort();
   if (!dates.length) return null;
@@ -56,14 +60,19 @@ function buildCoverage(dailyActivity) {
 }
 
 // Hour-of-day usage shape: how many of the 24 hours ever saw activity, and what share falls inside a
-// conventional 08:00-18:00 workday (local to whatever timezone Claude Code stamped the hour in).
+// conventional 09:00-17:00 workday (local to whatever timezone Claude Code stamped the hour in).
 // Deliberately not called "uptime" in this module's data - that word implies a service kept alive,
 // and this is presence-of-activity across a usage history instead. The HTML layer chooses the label.
-function buildHourOfDay(hourCounts) {
+export const BUSINESS_HOUR_START = 9;
+export const BUSINESS_HOUR_END = 17; // exclusive
+
+export function buildHourOfDay(hourCounts) {
   const entries = Array.from({ length: 24 }, (_, h) => ({ hour: h, count: hourCounts[String(h)] ?? 0 }));
   const total = entries.reduce((a, e) => a + e.count, 0);
   const hoursWithActivity = entries.filter((e) => e.count > 0).length;
-  const businessHoursCount = entries.filter((e) => e.hour >= 8 && e.hour < 18).reduce((a, e) => a + e.count, 0);
+  const businessHoursCount = entries
+    .filter((e) => e.hour >= BUSINESS_HOUR_START && e.hour < BUSINESS_HOUR_END)
+    .reduce((a, e) => a + e.count, 0);
   return {
     hours: entries.map((e) => ({ ...e, pct: total ? (e.count / total) * 100 : 0 })),
     total,
@@ -98,7 +107,10 @@ function sumModelUsageTokens(modelUsage) {
   return { byModel, totals };
 }
 
-function buildPrSummary(prs) {
+// `all` is kept in full (not just the top-N shown in the report) so report/mergeActivity.js can
+// dedupe by URL across two machines' caches exactly, instead of trying to reconcile two already-
+// truncated top-10 lists. The HTML layer slices to a display-sized list itself.
+export function buildPrSummary(prs) {
   if (!prs) return null;
   const byState = {};
   const byReview = { APPROVED: 0, CHANGES_REQUESTED: 0, COMMENTED: 0, none: 0 };
@@ -111,9 +123,8 @@ function buildPrSummary(prs) {
     additions += pr.additions;
     deletions += pr.deletions;
   }
-  const top = [...prs]
+  const all = [...prs]
     .sort((a, b) => b.additions + b.deletions - (a.additions + a.deletions))
-    .slice(0, 10)
     .map((pr) => ({ number: pr.number, title: pr.title, state: pr.state, review: pr.review, additions: pr.additions, deletions: pr.deletions, url: pr.url }));
   return {
     total: prs.length,
@@ -123,7 +134,7 @@ function buildPrSummary(prs) {
     additions,
     deletions,
     linesChanged: additions + deletions,
-    top,
+    all,
   };
 }
 
@@ -198,12 +209,17 @@ export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache
     },
     projects: {
       distinctCount: activityScan.projects.length,
+      // Full list (not just the count) so a merge can union two machines' project sets instead of
+      // just summing counts, which would double-count a project touched from both.
+      list: activityScan.projects,
       workflowRunsSeen: activityScan.workflowRunsSeen,
       subagentFiles: activityScan.subagentFiles,
       workflowAgentFiles: activityScan.workflowAgentFiles,
     },
     tools: {
-      topTools: activityScan.toolCallCounts.slice(0, 12),
+      // Kept in full (not sliced to a display-sized top-N) so a merge can sum calls per tool exactly
+      // before re-sorting; report/visualiseHtml.js slices to a display-sized list at render time.
+      topTools: activityScan.toolCallCounts,
     },
     skillInvocations: activityScan.skillInvocations,
     scan: {
