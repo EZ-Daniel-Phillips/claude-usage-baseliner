@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { resolveConfig } from './config.js';
 import { runBaseline } from './commands/baselineCommand.js';
 import { runCompare, NoBaselineError } from './commands/compareCommand.js';
+import { runVisualise } from './commands/visualiseCommand.js';
 import { setVerbosity, error } from './util/log.js';
 
 const HELP = `claude-usage-baseliner
@@ -13,10 +14,15 @@ over time. Output (JSON + HTML reports, and scan state) is always written under
 Usage:
   claude-usage-baseliner --baseline [options]
   claude-usage-baseliner --compare [options]
+  claude-usage-baseliner --visualise [options]
 
 Options:
   --baseline              Scan everything available and establish a fresh reference point.
   --compare               Measure all activity since the last baseline and compare against it.
+  --visualise             Build a dashboard of what you've done with Claude over its whole usage
+                          history (sessions, uptime pattern, tokens, commits, worktrees, PRs, lines
+                          written). Independent of --baseline/--compare: never reads or writes
+                          state.json, and writes its own report under claude-usage-baseliner/visualise/.
   --since-last            With --compare, measure only what is new since the previous scan instead
                           of everything since the baseline. Consumes that window: the next run will
                           not see it again.
@@ -36,6 +42,7 @@ export async function main(argv) {
       options: {
         baseline: { type: 'boolean' },
         compare: { type: 'boolean' },
+        visualise: { type: 'boolean' },
         'since-last': { type: 'boolean' },
         'claude-dir': { type: 'string' },
         'min-n': { type: 'string' },
@@ -57,8 +64,9 @@ export async function main(argv) {
     return 0;
   }
 
-  if (parsed.values.baseline === parsed.values.compare) {
-    error('Exactly one of --baseline or --compare is required.');
+  const modes = ['baseline', 'compare', 'visualise'].filter((m) => parsed.values[m]);
+  if (modes.length !== 1) {
+    error('Exactly one of --baseline, --compare, or --visualise is required.');
     console.log(HELP);
     return 1;
   }
@@ -69,8 +77,10 @@ export async function main(argv) {
   try {
     if (parsed.values.baseline) {
       await runBaseline(config);
-    } else {
+    } else if (parsed.values.compare) {
       await runCompare(config);
+    } else {
+      await runVisualise(config);
     }
     return 0;
   } catch (e) {

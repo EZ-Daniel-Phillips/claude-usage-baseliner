@@ -263,6 +263,94 @@ export function horizontalBars(rows, { width = 860, labelW = 220, rowHeight = 26
 }
 
 // ---------------------------------------------------------------------------
+// Vertical time-series bars (daily activity over the whole usage history)
+// ---------------------------------------------------------------------------
+// Built for a few dozen to a few hundred points (one per active day), so bars are thin and only a
+// sparse subset of dates gets an axis label - labelling every bar would be illegible at that count.
+export function timeSeriesBars(rows, { width = 860, height = 220, valueLabel = 'value', maxLabels = 10 } = {}) {
+  if (!rows.length) return '<p class="muted">No data.</p>';
+  const padL = 46;
+  const padR = 10;
+  const padT = 14;
+  const padB = 30;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+  const max = Math.max(...rows.map((r) => r.value)) || 1;
+  const gap = rows.length > 120 ? 0.5 : 1.5;
+  const barW = Math.max(0.6, plotW / rows.length - gap);
+  const sy = (v) => padT + plotH - (v / max) * plotH;
+
+  const labelEvery = Math.max(1, Math.ceil(rows.length / maxLabels));
+  const bars = rows
+    .map((r, i) => {
+      const x = padL + i * (plotW / rows.length);
+      const h = Math.max(0.5, (r.value / max) * plotH);
+      const showLabel = i % labelEvery === 0 || i === rows.length - 1;
+      return `<g>
+        <rect class="bar-a" x="${x.toFixed(2)}" y="${sy(r.value).toFixed(1)}" width="${barW.toFixed(2)}" height="${h.toFixed(1)}"><title>${esc(r.label)}: ${esc(r.valueText ?? String(r.value))}</title></rect>
+        ${showLabel ? `<text class="tick" x="${(x + barW / 2).toFixed(1)}" y="${padT + plotH + 16}" text-anchor="middle">${esc(r.label)}</text>` : ''}
+      </g>`;
+    })
+    .join('');
+
+  const yTicks = [0, 0.5, 1]
+    .map((f) => {
+      const v = max * f;
+      const y = sy(v);
+      return `<line class="grid" x1="${padL}" y1="${y.toFixed(1)}" x2="${padL + plotW}" y2="${y.toFixed(1)}"/>
+        <text class="tick" x="${padL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${esc(fmtCompact(v))}</text>`;
+    })
+    .join('');
+
+  return `<figure class="chart">
+    <svg viewBox="0 0 ${width} ${height}" role="img" width="100%" preserveAspectRatio="xMidYMid meet" aria-label="${esc(valueLabel)} over time">
+      ${yTicks}
+      ${bars}
+      <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}"/>
+    </svg>
+  </figure>`;
+}
+
+// ---------------------------------------------------------------------------
+// Hour-of-day bars (24 bars, when work actually happens across the day)
+// ---------------------------------------------------------------------------
+export function hourOfDayChart(hours, { width = 860, height = 200 } = {}) {
+  if (!hours.length) return '<p class="muted">No data.</p>';
+  const padL = 46;
+  const padR = 10;
+  const padT = 14;
+  const padB = 26;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+  const max = Math.max(...hours.map((h) => h.count)) || 1;
+  const barW = plotW / hours.length - 3;
+  const sy = (v) => padT + plotH - (v / max) * plotH;
+
+  const bars = hours
+    .map((h, i) => {
+      const x = padL + i * (plotW / hours.length);
+      const barH = Math.max(0.5, (h.count / max) * plotH);
+      const business = h.hour >= 8 && h.hour < 18;
+      return `<g>
+        <rect class="${business ? 'bar-a' : 'bar-b'}" x="${x.toFixed(2)}" y="${sy(h.count).toFixed(1)}" width="${barW.toFixed(2)}" height="${barH.toFixed(1)}" rx="2"><title>${String(h.hour).padStart(2, '0')}:00 &ndash; ${fmtCompact(h.count)} tool/message events (${h.pct.toFixed(1)}%)</title></rect>
+        <text class="tick" x="${(x + barW / 2).toFixed(1)}" y="${padT + plotH + 14}" text-anchor="middle">${h.hour % 3 === 0 ? h.hour : ''}</text>
+      </g>`;
+    })
+    .join('');
+
+  return `<figure class="chart">
+    <svg viewBox="0 0 ${width} ${height}" role="img" width="100%" preserveAspectRatio="xMidYMid meet" aria-label="Activity by hour of day">
+      ${bars}
+      <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}"/>
+    </svg>
+    <div class="legend">
+      <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Business hours (08:00&ndash;18:00)</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--series-2)"></span>Outside business hours</span>
+    </div>
+  </figure>`;
+}
+
+// ---------------------------------------------------------------------------
 // Waterfall (where the saving came from)
 // ---------------------------------------------------------------------------
 // Steps are signed contributions in USD-per-request. Diverging encoding: one hue per direction plus

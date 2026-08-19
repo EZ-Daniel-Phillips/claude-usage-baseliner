@@ -6,8 +6,9 @@ change over time.
 ## Usage
 
 ```
-node bin/claude-usage-baseliner.js --baseline [--claude-dir <path>]
-node bin/claude-usage-baseliner.js --compare  [--claude-dir <path>]
+node bin/claude-usage-baseliner.js --baseline   [--claude-dir <path>]
+node bin/claude-usage-baseliner.js --compare    [--claude-dir <path>]
+node bin/claude-usage-baseliner.js --visualise  [--claude-dir <path>]
 ```
 
 `--baseline` scans everything currently available under the target `.claude` directory (default:
@@ -35,10 +36,46 @@ clones/reinstalls of this tool.
   state.json
   baselines/baseline-<timestamp>.json + .html
   compares/compare-<timestamp>.json + .html
+  visualise/visualise-<timestamp>.json + .html
 ```
 
 See `--help` for all options (`--since-last`, `--min-n`, `--bootstrap-samples`, `--quiet`,
 `--verbose`).
+
+## `--visualise`: what you did with Claude
+
+A third, independent mode: not "what did it cost", but "what did you actually do" - sessions, an
+"uptime" pattern (active days and hour-of-day spread, since Claude Code is a CLI with no process to
+ask "was it running 24/7"), total tokens, commits, worktrees created, lines written, and pull
+requests raised/reviewed.
+
+It is deliberately isolated from `--baseline`/`--compare`:
+
+- It never reads or writes `state.json`, so it cannot move, consume, or otherwise affect your
+  baseline reference point or a `--compare` window.
+- It writes only to its own `visualise/` subdirectory - never `baselines/` or `compares/`.
+- It runs its own transcript walk (`src/scan/activityScanner.js`), independent of the
+  usage/cost scanner and its dedupe/cursor state.
+
+Because Claude Code's transcripts rotate after roughly 30 days (see below), `--visualise` combines
+three sources to cover the tool's whole history, not just what is still on disk:
+
+- **`stats-cache.json`** (Claude Code's own usage cache, at the root of the scanned directory) -
+  survives transcript rotation, so it is the source for all-time sessions, messages, hour-of-day
+  activity, daily activity, and token totals by model.
+- **`gh-pr-status-cache.json`** (Claude Code's gh PR status-poll cache) - pull requests it has
+  tracked, their state, review outcome, and GitHub's own additions/deletions count.
+- **A fresh transcript scan** - commits, pushes, worktree creations (both the `EnterWorktree` tool
+  and raw `git worktree add`), `gh pr` command usage, and an estimated line count from Write/Edit
+  tool calls. This part only sees the ~30-day retention window still on disk.
+
+Both cache files are optional; a missing one degrades that section of the report rather than
+failing the run.
+
+**The lines-written/edited figures are an estimate, not a diff** - they count lines passed to the
+Write/Edit tools, so they cannot see reverts, repeated rewrites of the same lines, or code changed
+outside Claude Code. Where a PR exists, its GitHub-computed additions/deletions are the more
+trustworthy figure.
 
 ## Reading the report
 

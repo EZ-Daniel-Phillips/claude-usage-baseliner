@@ -719,7 +719,10 @@ function methodExplainer(reportData) {
 // Styles
 // ---------------------------------------------------------------------------
 
-const STYLE = `
+// Exported so visualise.js can build a second, unrelated report page in the same visual language
+// without duplicating the palette/typography - purely a shared read-only constant, not a functional
+// dependency on baseline/compare behaviour.
+export const STYLE = `
   :root {
     color-scheme: light;
     --bg: #ffffff; --surface: #fcfcfb; --fg: #1b1f24; --muted: #5b6470; --border: #dfe3e8;
