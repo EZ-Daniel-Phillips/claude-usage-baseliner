@@ -26,11 +26,15 @@ Options:
                           worktrees, lines written). Independent of --baseline/--compare: never reads
                           or writes state.json, and writes its own report under
                           claude-usage-baseliner/visualise/.
-  --merge                 Combine two or more --visualise JSON reports (e.g. one dumped from each of
-                          several machines) into a single merged JSON+HTML report. Pass each file with
-                          its own --input.
-  --input <path>          A --visualise JSON report to fold into --merge. Repeat for each source
-                          machine; at least two are required.
+  --merge                 Combine two or more report JSON files of the same family (e.g. one dumped
+                          from each of several machines) into a single merged JSON+HTML report. All
+                          --input files must be --visualise reports, or all must be --baseline/
+                          --compare reports (any mix of the two) - the two families cannot be mixed
+                          together. A merged --baseline/--compare report is a standalone snapshot,
+                          written under claude-usage-baseliner/merged/: it is never state.json's
+                          baseline and can never be passed to --compare as a reference point.
+  --input <path>          A --visualise or --baseline/--compare JSON report to fold into --merge.
+                          Repeat for each source machine; at least two are required.
   --since-last            With --compare, measure only what is new since the previous scan instead
                           of everything since the baseline. Consumes that window: the next run will
                           not see it again.

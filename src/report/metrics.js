@@ -35,7 +35,9 @@ function sumTokenClasses(records) {
   };
 }
 
-function tokenShare(totals) {
+// Exported so mergeReportData.js can recompute a merged report's share from summed token totals
+// with the exact same formula, instead of re-deriving it.
+export function tokenShare(totals) {
   const t = totals.total || 1; // avoid div-by-zero when there is genuinely no data
   return {
     input: (totals.inputTokens / t) * 100,

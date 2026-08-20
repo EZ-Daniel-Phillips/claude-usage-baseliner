@@ -37,6 +37,8 @@ clones/reinstalls of this tool.
   baselines/baseline-<timestamp>.json + .html
   compares/compare-<timestamp>.json + .html
   visualise/visualise-<timestamp>.json + .html
+  merged/report-merged-<timestamp>.json + .html      (--merge, --baseline/--compare inputs)
+  visualise/visualise-merged-<timestamp>.json + .html (--merge, --visualise inputs)
 ```
 
 See `--help` for all options (`--since-last`, `--min-n`, `--bootstrap-samples`, `--quiet`,
@@ -129,7 +131,7 @@ the gap between `lastComputedDate` and the oldest transcript still on disk is la
 that span is permanently unrecoverable and the report says so - session/message *counts* (which still
 come only from the cache) are the one figure this does not fix.
 
-### `--merge`: combining data from more than one machine
+### `--merge`: combining --visualise data from more than one machine
 
 Each machine you use Claude Code on has its own `~/.claude`, so a single `--visualise` run only ever
 sees that machine's history. `--merge` combines two or more `--visualise` JSON reports - typically one
@@ -172,6 +174,56 @@ or averaged:
 The merged report is rendered with the same HTML as a single-machine `--visualise` report, with an
 added panel listing every source it was built from. Like `--visualise` itself, `--merge` only reads
 the files named by `--input` and writes its own JSON+HTML pair - it never touches `state.json`.
+
+### `--merge`: combining --baseline/--compare data from more than one machine
+
+The same `--merge` flag also accepts `--baseline`/`--compare` report JSON instead of `--visualise`
+JSON - useful when several machines each keep their own baseline (or their own compare, measured
+since their own baseline) and you want one combined view of your total usage:
+
+```
+# On machine A:
+node bin/claude-usage-baseliner.js --baseline
+# -> ~/.claude/claude-usage-baseliner/baselines/baseline-<timestamp>.json
+
+# On machine B:
+node bin/claude-usage-baseliner.js --baseline
+# -> ~/.claude/claude-usage-baseliner/baselines/baseline-<timestamp>.json
+
+# Copy both JSON files to one machine, then:
+node bin/claude-usage-baseliner.js --merge \
+  --input machineA-baseline-<timestamp>.json \
+  --input machineB-baseline-<timestamp>.json
+# -> ~/.claude/claude-usage-baseliner/merged/report-merged-<timestamp>.json + .html
+```
+
+All `--input` files must be the same family: either all `--visualise` reports, or all
+`--baseline`/`--compare` reports. Within the `--baseline`/`--compare` family, mixing is allowed - a
+`--baseline` covers everything scanned as of that machine's baseline, a `--compare` covers everything
+since its own baseline, and both are stored in an identical shape, so combining any mix of them is
+mechanical. What mixing does **not** give you is a combined before/after verdict: a `--compare` report
+never persists its own baseline's raw per-agent-type/tool-payload/compaction data (only the findings
+already derived from it), so there isn't enough on disk to rebuild a rigorous merged comparison. A
+merged `--baseline`/`--compare` report is therefore always rendered as a standing snapshot - "where do
+we stand, combined" - never a verdict, and it can never be passed to `--compare` as a reference point
+since it never touches any machine's `state.json`.
+
+Fields are combined the same way as a `--visualise` merge - correctly, not uniformly:
+
+- **Summed exactly** - requests, every token count and cost, per-model/per-agent-type/per-tier
+  totals, tool-payload bytes, compaction counts, transcript files scanned.
+- **Recomputed from the merged totals** - estimated cost and the per-request profile are re-derived
+  from the summed per-model breakdown, so they price exactly rather than blending two already-derived
+  rates.
+- **Estimated from a combined sample** - the median, percentiles and confidence intervals for
+  request/session/hour size. Each source only ever stored a bounded random sample (up to 5,000
+  values), not every raw value, so these are recomputed from a sample drawn from each source in
+  proportion to its true size (a small source can't outweigh a much larger one just because both
+  stored an equally-sized sample) - representative, but no longer exact the way a single-machine
+  report's percentiles are.
+
+The merged report discloses all of this itself, with a sources table (each source's id, mode,
+`claudeDir`, and the window it covers) and a "How the merged sources were combined" section.
 
 ## Reading the report
 
