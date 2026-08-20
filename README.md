@@ -6,8 +6,9 @@ change over time.
 ## Usage
 
 ```
-node bin/claude-usage-baseliner.js --baseline [--claude-dir <path>]
-node bin/claude-usage-baseliner.js --compare  [--claude-dir <path>]
+node bin/claude-usage-baseliner.js --baseline   [--claude-dir <path>]
+node bin/claude-usage-baseliner.js --compare    [--claude-dir <path>]
+node bin/claude-usage-baseliner.js --visualise  [--claude-dir <path>]
 ```
 
 `--baseline` scans everything currently available under the target `.claude` directory (default:
@@ -35,10 +36,129 @@ clones/reinstalls of this tool.
   state.json
   baselines/baseline-<timestamp>.json + .html
   compares/compare-<timestamp>.json + .html
+  visualise/visualise-<timestamp>.json + .html
 ```
 
 See `--help` for all options (`--since-last`, `--min-n`, `--bootstrap-samples`, `--quiet`,
 `--verbose`).
+
+## `--visualise`: what you did with Claude
+
+A third, independent mode: not "what did it cost", but "what did you actually do" - sessions, an
+activity/hour-of-day pattern, total tokens, commits, worktrees created, and lines written.
+
+Its HTML report is styled deliberately differently from `--baseline`/`--compare`'s: a wide, light,
+large-type layout meant to be read from across a room (e.g. on a TV during a presentation), not just
+at a desk. This styling is self-contained to `--visualise`/`--merge` output and never touches
+`--baseline`/`--compare`'s report design.
+
+It is deliberately isolated from `--baseline`/`--compare`:
+
+- It never reads or writes `state.json`, so it cannot move, consume, or otherwise affect your
+  baseline reference point or a `--compare` window.
+- It writes only to its own `visualise/` subdirectory - never `baselines/` or `compares/`.
+- It runs its own transcript walk (`src/scan/activityScanner.js`), independent of the
+  usage/cost scanner and its dedupe/cursor state.
+
+Because Claude Code's transcripts rotate after roughly 30 days, `--visualise` combines two sources
+to cover the tool's whole history, not just what is still on disk:
+
+- **`stats-cache.json`** (Claude Code's own usage cache, at the root of the scanned directory) -
+  survives transcript rotation, so it is the source for all-time session/message counts.
+- **A fresh transcript scan** - commits, pushes, worktree creations (both the `EnterWorktree` tool
+  and raw `git worktree add`), an estimated line count from Write/Edit tool calls, and (see below)
+  hour-of-day activity, daily activity, and any token/model usage newer than the cache. This part
+  only sees the ~30-day retention window still on disk.
+
+`stats-cache.json` is optional; a missing file degrades that section of the report rather than
+failing the run.
+
+**The lines-written/edited figures are an estimate, not a diff** - they count lines passed to the
+Write/Edit tools, so they cannot see reverts, repeated rewrites of the same lines, or code changed
+outside Claude Code.
+
+**Pull-request metrics were tried and removed.** `gh-pr-status-cache.json` turned out to be a small
+rolling status-poll cache (whatever PRs the status line last checked), not a ledger, and the `gh pr
+create`/`gh pr review` command counts from transcripts were no more trustworthy (~30-day window,
+only PRs actually raised through the gh CLI). Both signals silently and significantly understated
+real PR history, so rather than keep an unreliable metric with caveats, it was removed outright.
+
+**Hour-of-day and daily activity no longer come from `stats-cache.json`.** An earlier version read
+its `hourCounts` field, which turned out to be a per-*session-start* histogram, not an activity
+histogram (`sum(hourCounts) === totalSessions`, exactly) - a session left running unattended for
+hours or days registered identically to a 30-second one, so genuinely long-running or overnight
+sessions never showed up as overnight activity. Hour-of-day and the recent daily-activity chart are
+now computed directly from transcript timestamps still on disk, counting two distinct kinds of
+event: **"Claude working"** (any assistant turn, or any tool round-trip, across every tier - main
+sessions, subagents, and workflow agents) and **"your prompts"** (genuine human-typed messages, main
+sessions only). This is why the two are shown as separate series rather than one number: a
+subagent's opening message is its parent's injected task text, not something you typed, and an
+unattended multi-hour or multi-day run should show up as hours of Claude-working activity, not one
+entry at whatever hour it was started.
+
+**A stale cache blocks the run by default.** `/stats` inside Claude Code is the only known way to
+force a recompute (see below), so `--visualise` checks `lastComputedDate` before scanning anything: if
+the cache is more than `--max-cache-age` days old (default 2), it prompts to continue anyway when run
+interactively, or refuses outright with a one-line error when not (e.g. in a script or CI). Pass
+`--allow-stale-cache` to skip the check entirely, or a larger `--max-cache-age <days>` to raise the
+threshold. This exists because the only fix for stale session/message *counts* (as opposed to token
+totals, see below) is to actually refresh the cache - there's no live substitute for history older than
+the ~30-day transcript retention window.
+
+**`stats-cache.json` can be stale, and token/model totals are supplemented for it.** The cache is
+recomputed by Claude Code itself on its own schedule, not on every run - `lastComputedDate` (shown at
+the top of the report) can lag behind today by weeks, which previously hid any model adopted after
+that date (e.g. a newly-released model) from the token/cost breakdown entirely. The report now
+supplements the cached per-model token totals with anything computed live from transcripts dated
+after `lastComputedDate` (deduplicated by message id, so nothing already in the cache is
+double-counted), and discloses how stale the cache is and how many tokens were recovered this way. If
+the gap between `lastComputedDate` and the oldest transcript still on disk is larger than one day,
+that span is permanently unrecoverable and the report says so - session/message *counts* (which still
+come only from the cache) are the one figure this does not fix.
+
+### `--merge`: combining data from more than one machine
+
+Each machine you use Claude Code on has its own `~/.claude`, so a single `--visualise` run only ever
+sees that machine's history. `--merge` combines two or more `--visualise` JSON reports - typically one
+dumped from each machine - into a single merged JSON+HTML report:
+
+```
+# On machine A:
+node bin/claude-usage-baseliner.js --visualise
+# -> ~/.claude/claude-usage-baseliner/visualise/visualise-<timestamp>.json
+
+# On machine B:
+node bin/claude-usage-baseliner.js --visualise
+# -> ~/.claude/claude-usage-baseliner/visualise/visualise-<timestamp>.json
+
+# Copy both JSON files to one machine, then:
+node bin/claude-usage-baseliner.js --merge \
+  --input machineA-visualise-<timestamp>.json \
+  --input machineB-visualise-<timestamp>.json
+```
+
+`--input` may be repeated any number of times (two or more required), including a previously merged
+report - merging a merge just extends its source list rather than nesting.
+
+Fields are combined by whichever rule is actually correct for what they measure, not uniformly summed
+or averaged:
+
+- **Summed** - each source's activity is genuinely independent, so nothing here can double-count:
+  sessions, messages, tokens, commits, pushes, lines written/edited, subagent/workflow counts,
+  transcript files scanned.
+- **Recomputed from combined raw data, not averaged** - the cached and recent daily-activity series
+  are each merged date-by-date (kept separate from each other, since they measure different things -
+  see above), then active-day coverage, streaks and gaps are recalculated from the union of active
+  dates across both; the "Claude working" and "your prompts" hour-of-day series are each summed per
+  hour across sources before percentages/shares are recalculated.
+- **Deduplicated** - distinct project/worktree names are unioned rather than summed.
+- **Not carried over** - per-source cache-staleness detail (each machine has its own
+  `stats-cache.json` on its own recompute schedule) doesn't collapse into one meaningful figure, so a
+  merged report doesn't show a staleness banner; check each source's own report for that.
+
+The merged report is rendered with the same HTML as a single-machine `--visualise` report, with an
+added panel listing every source it was built from. Like `--visualise` itself, `--merge` only reads
+the files named by `--input` and writes its own JSON+HTML pair - it never touches `state.json`.
 
 ## Reading the report
 

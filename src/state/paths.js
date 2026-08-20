@@ -19,6 +19,12 @@ export function getComparesDir() {
   return path.join(getOutputRoot(), 'compares');
 }
 
+// Separate from baselines/ and compares/ by construction: --visualise never reads or writes
+// state.json, so it cannot perturb the baseline/compare reference point no matter what it does.
+export function getVisualiseDir() {
+  return path.join(getOutputRoot(), 'visualise');
+}
+
 export function defaultClaudeDir() {
   return path.join(os.homedir(), '.claude');
 }

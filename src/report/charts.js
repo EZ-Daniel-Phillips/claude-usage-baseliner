@@ -263,6 +263,112 @@ export function horizontalBars(rows, { width = 860, labelW = 220, rowHeight = 26
 }
 
 // ---------------------------------------------------------------------------
+// Vertical time-series bars (daily activity over the whole usage history)
+// ---------------------------------------------------------------------------
+// Built for a few dozen to a few hundred points (one per active day), so bars are thin and only a
+// sparse subset of dates gets an axis label - labelling every bar would be illegible at that count.
+export function timeSeriesBars(rows, { width = 860, height = 220, valueLabel = 'value', maxLabels = 10 } = {}) {
+  if (!rows.length) return '<p class="muted">No data.</p>';
+  const padL = 46;
+  const padR = 10;
+  const padT = 14;
+  const padB = 30;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+  const max = Math.max(...rows.map((r) => r.value)) || 1;
+  const gap = rows.length > 120 ? 0.5 : 1.5;
+  const barW = Math.max(0.6, plotW / rows.length - gap);
+  const sy = (v) => padT + plotH - (v / max) * plotH;
+
+  const labelEvery = Math.max(1, Math.ceil(rows.length / maxLabels));
+  const bars = rows
+    .map((r, i) => {
+      const x = padL + i * (plotW / rows.length);
+      const h = Math.max(0.5, (r.value / max) * plotH);
+      const showLabel = i % labelEvery === 0 || i === rows.length - 1;
+      return `<g>
+        <rect class="bar-a" x="${x.toFixed(2)}" y="${sy(r.value).toFixed(1)}" width="${barW.toFixed(2)}" height="${h.toFixed(1)}"><title>${esc(r.label)}: ${esc(r.valueText ?? String(r.value))}</title></rect>
+        ${showLabel ? `<text class="tick" x="${(x + barW / 2).toFixed(1)}" y="${padT + plotH + 16}" text-anchor="middle">${esc(r.label)}</text>` : ''}
+      </g>`;
+    })
+    .join('');
+
+  const yTicks = [0, 0.5, 1]
+    .map((f) => {
+      const v = max * f;
+      const y = sy(v);
+      return `<line class="grid" x1="${padL}" y1="${y.toFixed(1)}" x2="${padL + plotW}" y2="${y.toFixed(1)}"/>
+        <text class="tick" x="${padL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${esc(fmtCompact(v))}</text>`;
+    })
+    .join('');
+
+  return `<figure class="chart">
+    <svg viewBox="0 0 ${width} ${height}" role="img" width="100%" preserveAspectRatio="xMidYMid meet" aria-label="${esc(valueLabel)} over time">
+      ${yTicks}
+      ${bars}
+      <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}"/>
+    </svg>
+  </figure>`;
+}
+
+// ---------------------------------------------------------------------------
+// Hour-of-day bars (24 hours, two series: Claude working vs. your prompts)
+// ---------------------------------------------------------------------------
+// "Claude working" (assistant turns + tool round-trips, every tier) and "your prompts" (genuine
+// human-authored lines, main tier only) are shown as paired bars, each scaled as a share of that
+// series' own total - the two series can differ by an order of magnitude in raw count (many tool
+// round-trips per human prompt), so plotting raw counts on one shared scale would make the smaller
+// series invisible. Business hours are shown as a shaded background band rather than bar colour,
+// since bar colour now identifies the series instead.
+export function hourOfDayChart(hours, { width = 860, height = 220, businessStart = 9, businessEnd = 17 } = {}) {
+  if (!hours.length) return '<p class="muted">No data.</p>';
+  const padL = 46;
+  const padR = 10;
+  const padT = 14;
+  const padB = 26;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+  const max = Math.max(...hours.map((h) => Math.max(h.pctClaudeWorking ?? 0, h.pctHumanPrompts ?? 0))) || 1;
+  const slotW = plotW / hours.length;
+  const barW = Math.max(0.6, slotW / 2 - 1.5);
+  const sy = (v) => padT + plotH - (v / max) * plotH;
+  const pad2 = (n) => String(n).padStart(2, '0');
+
+  const businessBand =
+    businessEnd > businessStart
+      ? `<rect x="${(padL + businessStart * slotW).toFixed(1)}" y="${padT}" width="${((businessEnd - businessStart) * slotW).toFixed(1)}" height="${plotH.toFixed(1)}" fill="var(--neutral-bg)"/>`
+      : '';
+
+  const bars = hours
+    .map((h, i) => {
+      const xSlot = padL + i * slotW;
+      const cw = h.pctClaudeWorking ?? 0;
+      const hp = h.pctHumanPrompts ?? 0;
+      const cwH = Math.max(0.5, (cw / max) * plotH);
+      const hpH = Math.max(0.5, (hp / max) * plotH);
+      return `<g>
+        <rect class="bar-a" x="${xSlot.toFixed(2)}" y="${sy(cw).toFixed(1)}" width="${barW.toFixed(2)}" height="${cwH.toFixed(1)}" rx="1.5"><title>${pad2(h.hour)}:00 &ndash; Claude working: ${fmtCompact(h.claudeWorking)} events (${cw.toFixed(1)}% of all Claude-working events)</title></rect>
+        <rect class="bar-b" x="${(xSlot + barW + 1.5).toFixed(2)}" y="${sy(hp).toFixed(1)}" width="${barW.toFixed(2)}" height="${hpH.toFixed(1)}" rx="1.5"><title>${pad2(h.hour)}:00 &ndash; your prompts: ${fmtCompact(h.humanPrompts)} (${hp.toFixed(1)}% of all your prompts)</title></rect>
+        <text class="tick" x="${(xSlot + slotW / 2).toFixed(1)}" y="${padT + plotH + 14}" text-anchor="middle">${h.hour % 3 === 0 ? h.hour : ''}</text>
+      </g>`;
+    })
+    .join('');
+
+  return `<figure class="chart">
+    <svg viewBox="0 0 ${width} ${height}" role="img" width="100%" preserveAspectRatio="xMidYMid meet" aria-label="Activity by hour of day, local time: Claude working versus your prompts">
+      ${businessBand}
+      ${bars}
+      <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}"/>
+    </svg>
+    <div class="legend">
+      <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Claude working (assistant turns + tool round-trips)</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--series-2)"></span>Your prompts (human-typed messages)</span>
+      <span class="legend-item muted">Shaded band: business hours (${pad2(businessStart)}:00&ndash;${pad2(businessEnd)}:00)</span>
+    </div>
+  </figure>`;
+}
+
+// ---------------------------------------------------------------------------
 // Waterfall (where the saving came from)
 // ---------------------------------------------------------------------------
 // Steps are signed contributions in USD-per-request. Diverging encoding: one hue per direction plus
