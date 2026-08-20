@@ -100,6 +100,20 @@ threshold. This exists because the only fix for stale session/message *counts* (
 totals, see below) is to actually refresh the cache - there's no live substitute for history older than
 the ~30-day transcript retention window.
 
+**Estimated spend is API-equivalent, not necessarily your bill.** The token-based cost figure prices
+usage at published pay-as-you-go API list rates - useful for understanding cost *shape* (which model,
+which token class), but not what a subscription/seat plan (Pro, Max, Team, Enterprise) actually
+charges you, since those are flat fees. Pass `--plan-cost <usd per month>` (your seat/subscription
+cost) to also see an **estimated actual spend**: that flat fee, prorated over the number of days the
+report covers. This is deliberately a **floor, not a full bill** - it does not, and cannot, model
+extra-usage billing for exceeding a plan's rolling 5-hour/weekly allowance (billed at API rates on
+some plans), because that allowance/consumption state isn't available anywhere in local Claude Code
+data. If you went over your allowance during the period shown, real spend was higher than this figure.
+`--merge` recomputes this the same way `--merge` recomputes coverage - not summed across sources (a
+plan/seat fee is one person's subscription, not a per-machine cost) - picking up whichever source
+supplied `--plan-cost` most recently, or an explicit `--plan-cost` passed to the merge command itself,
+which always takes precedence.
+
 **`stats-cache.json` can be stale, and token/model totals are supplemented for it.** The cache is
 recomputed by Claude Code itself on its own schedule, not on every run - `lastComputedDate` (shown at
 the top of the report) can lag behind today by weeks, which previously hid any model adopted after

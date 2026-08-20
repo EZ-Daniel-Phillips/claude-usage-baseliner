@@ -69,12 +69,20 @@ function kpiCard(label, value, meaning) {
 
 function headlineKpis(rd) {
   const cost = rd.tokens.cost;
+  const actual = rd.tokens.actualSpend;
   const cards = [
     kpiCard('Sessions, all time', fmtInt(rd.sessions.totalAllTime), `Every conversation Claude Code has recorded since ${rd.period.firstSessionDate ? fmtWhen(rd.period.firstSessionDate).replace(/<[^>]+>/g, '') : 'it started tracking'}.`),
     kpiCard('Messages, all time', fmtInt(rd.sessions.totalMessagesAllTime), 'Total messages exchanged across every session on record.'),
     kpiCard('Longest session', rd.sessions.longestSession ? fmtDuration(rd.sessions.longestSession.duration) : 'n/a', rd.sessions.longestSession ? `${fmtInt(rd.sessions.longestSession.messageCount)} messages in one sitting.` : 'No session-length data recorded.'),
     kpiCard('Total tokens, all time', cost ? fmtCompact(rd.tokens.totals.total) : 'n/a', 'Every token class combined, summed across every model you have used.'),
-    kpiCard('Estimated spend, all time', cost ? usd(cost.total) : 'n/a', 'Priced at published API list rates - see the note at the bottom of this page.'),
+    kpiCard('Estimated API-equivalent spend', cost ? usd(cost.total) : 'n/a', 'What this usage would cost at published pay-as-you-go API list rates - not what a subscription/seat plan actually bills you. See the note at the bottom of this page.'),
+    actual
+      ? kpiCard(
+          'Estimated actual spend (floor)',
+          usd(actual.amount),
+          `Your $${fmtNum(actual.planCostPerMonth, 2)}/month plan cost, prorated over the ${fmtInt(actual.periodDays)} day(s) this report covers. A floor, not a full bill - excludes extra-usage billing for exceeding your plan's rolling 5-hour/weekly allowance, which this tool can't reliably measure.`
+        )
+      : kpiCard('Estimated actual spend (floor)', 'not set', 'Pass --plan-cost <usd per month> to see your flat-fee plan cost alongside the API-equivalent estimate above.'),
     kpiCard('Commits run', fmtInt(rd.git.commits), 'Bash calls matching `git commit`, seen in transcripts still on disk.'),
     kpiCard('Worktrees created', fmtInt(Math.max(rd.worktrees.createdViaTool, rd.worktrees.projectTraceCount)), 'Distinct worktrees Claude Code created for you (EnterWorktree tool calls, cross-checked against project directory traces).'),
     kpiCard('Lines written or edited', fmtInt(rd.code.linesWritten + rd.code.editLinesAdded), 'Write-tool file content plus Edit-tool replacement text, in transcripts still on disk. An estimate, not a diff.'),
@@ -174,6 +182,11 @@ function tokenSection(rd) {
         }</p>`
       : '';
 
+  const actual = t.actualSpend;
+  const actualSpendNote = actual
+    ? `<p class="callout callout-warn"><strong>Estimated actual spend (floor): ${esc(usd(actual.amount))}.</strong> Your plan is a flat $${fmtNum(actual.planCostPerMonth, 2)}/month fee (via <code>--plan-cost</code>), prorated over the ${fmtInt(actual.periodDays)} day(s) this report covers (${fmtNum(actual.periodDays / 30.4368, 2)} months). This is a floor, not your real bill: it does not include extra-usage billing for exceeding your plan's rolling 5-hour/weekly allowance, which is charged at API rates and cannot be reliably reconstructed from local data - if you went over that allowance during this period, actual spend was higher than shown here.</p>`
+    : `<p class="callout callout-info">The figures below are priced at API list rates, which is what this usage would cost pay-as-you-go - not necessarily your actual bill if you're on a subscription/seat plan. Pass <code>--plan-cost &lt;usd per month&gt;</code> to also see an estimated actual (flat-fee floor) spend.</p>`;
+
   const bar = stackedShareBar([
     { label: 'Cache read', value: t.totals.cacheReadTokens, valueText: fmtInt(t.totals.cacheReadTokens), colorVar: 'series-1' },
     { label: 'Cache write', value: t.totals.cacheCreationTokens, valueText: fmtInt(t.totals.cacheCreationTokens), colorVar: 'series-2' },
@@ -197,7 +210,7 @@ function tokenSection(rd) {
     )
     .join('');
 
-  return `${stalenessNote}${bar}
+  return `${stalenessNote}${actualSpendNote}${bar}
   <h3>Estimated spend by model</h3>
   ${modelChart}
   <table>
@@ -268,6 +281,7 @@ function methodSection(rd) {
       <li><strong>Hour-of-day and daily &ldquo;Claude working&rdquo;/&ldquo;your prompts&rdquo; activity</strong> are computed independently, directly from transcript timestamps still on disk, not from the cache. An earlier version of this report used the cache's <code>hourCounts</code> field instead; an audit found it counts one entry per <em>session start</em>, not per unit of activity, so a session left running unattended for hours or days registered identically to a 30-second one. The chart below fixes that by counting every assistant turn and tool round-trip as activity, across the whole span of a session.</li>
       <li><strong>Token/model totals</strong> combine the cached totals with anything newer found live in transcripts still on disk (deduplicated by message id, so nothing is double-counted) - this is what lets a model adopted after the cache's last computation (e.g. a newly-released model) still show up in the cost breakdown.</li>
       <li><strong>Commits, pushes, worktrees and lines written/edited</strong> come from that same fresh read of every transcript file still on disk${merged ? ' on each merged machine' : ` under <code>${esc(rd.claudeDir)}</code>`} (${fmtInt(rd.scan.filesScanned)} files total this run). Local transcripts rotate after roughly 30 days, so these figures only cover recent activity even though the page is titled by the tool's full lifetime.</li>
+      <li><strong>Estimated actual spend</strong> (shown only when <code>--plan-cost</code> is passed) is your flat plan/seat fee prorated over the days this report covers - it is not derived from token usage at all. It is deliberately a floor, not a full bill: subscription/seat plans (Pro, Max, Team, Enterprise) can charge extra-usage billing at API rates when you exceed a rolling 5-hour or weekly allowance, and that allowance/consumption state isn't available anywhere in local Claude Code data, so this report does not attempt to estimate it. If you went over your allowance during the period shown, your real spend was higher than this figure.</li>
     </ul>
     ${
       merged

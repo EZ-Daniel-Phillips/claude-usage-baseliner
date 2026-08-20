@@ -204,7 +204,20 @@ function buildStaleness(statsCache, activityScan) {
   return { lastComputedDate, daysSinceComputed, oldestTranscriptDate, unrecoverableGapDays };
 }
 
-export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache, activityScan }) {
+const AVG_DAYS_PER_MONTH = 30.4368; // 365.2425 / 12 - average Gregorian month, used to prorate a flat plan fee
+
+// A subscription/seat plan (Pro, Max, Team, Enterprise) isn't billed per token - the API-rate cost
+// estimate above answers "what would this usage cost pay-as-you-go", not "what did I actually pay".
+// Actual spend for a flat-fee plan is the plan cost itself, prorated over the span this report
+// covers - there is no per-plan price table here (Team/Enterprise seat pricing is contract-specific
+// and Pro/Max prices drift), so the caller supplies their own monthly figure via --plan-cost.
+export function buildActualSpend(planCostPerMonth, coverage) {
+  if (!planCostPerMonth || !coverage || !coverage.totalCalendarDays) return null;
+  const periodDays = coverage.totalCalendarDays;
+  return { planCostPerMonth, periodDays, amount: planCostPerMonth * (periodDays / AVG_DAYS_PER_MONTH) };
+}
+
+export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache, activityScan, planCostPerMonth = null }) {
   const lastComputedDate = statsCache?.lastComputedDate ?? null;
   const cachedDaily = statsCache?.dailyActivity ?? [];
   // Only the portion of the live scan's window the cache does not already cover, so the two series
@@ -221,6 +234,7 @@ export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache
   const cost = tokenSummary.byModel.length ? estimateCostByModel(tokenSummary.byModel) : null;
 
   const staleness = buildStaleness(statsCache, activityScan);
+  const actualSpend = buildActualSpend(planCostPerMonth, coverage);
 
   const recentSessions = activityScan.sessions.filter((s) => s.durationMs !== null);
   const recentTotalDurationMs = recentSessions.reduce((a, s) => a + s.durationMs, 0);
@@ -260,6 +274,11 @@ export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache
       cost,
       costModelNotes: COST_MODEL_NOTES,
       liveSupplementTotal: tokenSummary.liveSupplementTotal,
+      // The raw monthly figure supplied via --plan-cost (not the prorated amount) - kept here, not
+      // just inside `actualSpend`, so --merge can recover it from a source even where coverage was
+      // null on that machine and no actualSpend could be computed there.
+      planCostPerMonth,
+      actualSpend,
     },
     worktrees: {
       createdViaTool: activityScan.worktreeTool.created,

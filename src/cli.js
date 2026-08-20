@@ -39,6 +39,11 @@ Options:
                           /stats in Claude Code to refresh it. Default: 2.
   --allow-stale-cache     With --visualise, skip the stale-cache prompt/check entirely and proceed
                           no matter how old stats-cache.json is.
+  --plan-cost <usd>       Your flat monthly plan/seat cost (Pro, Max, Team, Enterprise). When set,
+                          --visualise/--merge show an estimated actual spend alongside the
+                          token/API-rate estimate, prorating this figure over the days the report
+                          covers. Omit if you're on pay-as-you-go API billing - the token estimate
+                          already is your actual spend in that case.
   --claude-dir <path>     Directory to scan (default: ~/.claude).
   --min-n <int>           Minimum sample size per side before running significance tests (default: 10).
   --bootstrap-samples <n> Resample count for percentile bootstrap CIs (default: 1500).
@@ -64,6 +69,7 @@ export async function main(argv) {
         'bootstrap-samples': { type: 'string' },
         'max-cache-age': { type: 'string' },
         'allow-stale-cache': { type: 'boolean' },
+        'plan-cost': { type: 'string' },
         quiet: { type: 'boolean' },
         verbose: { type: 'boolean' },
         help: { type: 'boolean' },
@@ -99,7 +105,7 @@ export async function main(argv) {
     } else if (parsed.values.visualise) {
       await runVisualise(config);
     } else {
-      await runMerge({ inputs: parsed.values.input });
+      await runMerge({ inputs: parsed.values.input, planCostPerMonth: config.planCostPerMonth });
     }
     return 0;
   } catch (e) {

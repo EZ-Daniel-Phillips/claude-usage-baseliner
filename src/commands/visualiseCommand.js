@@ -36,7 +36,7 @@ async function confirmStaleCache(daysStale, lastComputedDate, maxCacheAgeDays) {
 // not "what did it cost". Deliberately never touches state.json (state/cursor.js) or the
 // baselines/compares directories - see report/activityMetrics.js and scan/activityScanner.js for why
 // each data source was chosen to be independently readable without perturbing those modes.
-export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleCache = false }) {
+export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleCache = false, planCostPerMonth = null }) {
   info(`Reading usage cache under ${claudeDir} ...`);
   const statsCache = readStatsCache(claudeDir);
 
@@ -72,6 +72,7 @@ export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleC
     generatedAt: new Date().toISOString(),
     statsCache,
     activityScan,
+    planCostPerMonth,
   });
 
   const visualiseDir = getVisualiseDir();
