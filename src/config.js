@@ -14,11 +14,6 @@ export function resolveConfig(parsed) {
     sinceLast: Boolean(parsed.values['since-last']),
     maxCacheAgeDays: parsed.values['max-cache-age'] ? parseInt(parsed.values['max-cache-age'], 10) : DEFAULT_MAX_CACHE_AGE_DAYS,
     allowStaleCache: Boolean(parsed.values['allow-stale-cache']),
-    planCostPerMonth: (() => {
-      if (!parsed.values['plan-cost']) return null;
-      const v = parseFloat(parsed.values['plan-cost']);
-      return Number.isFinite(v) && v > 0 ? v : null;
-    })(),
     quiet: Boolean(parsed.values.quiet),
     verbose: Boolean(parsed.values.verbose),
   };

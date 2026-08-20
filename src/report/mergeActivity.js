@@ -1,5 +1,5 @@
 import { estimateCostByModel, COST_MODEL_NOTES } from './cost.js';
-import { buildCoverage, buildHourOfDay, buildActualSpend } from './activityMetrics.js';
+import { buildCoverage, buildHourOfDay } from './activityMetrics.js';
 
 // Combines two or more --visualise report-data objects (the JSON --visualise writes) into one, so
 // activity from separate machines - each with its own ~/.claude, its own stats-cache.json, its own
@@ -148,18 +148,7 @@ function mergeTools(list) {
   return [...byTool.entries()].map(([tool, calls]) => ({ tool, calls })).sort((a, b) => b.calls - a.calls);
 }
 
-// A flat plan/seat cost is one person's single subscription, not a per-machine cost, so it is never
-// summed across sources - each machine merged in presumably shares the same plan. Preferring the
-// override lets --merge's own --plan-cost correct a value a source was generated without (or update
-// one that has since changed); otherwise, the most recently-generated source's figure is used, since
-// that is the best available guess at the plan currently in effect.
-function pickPlanCostPerMonth(list, override) {
-  if (override) return override;
-  const withCost = list.filter((rd) => rd.tokens?.planCostPerMonth).sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : -1));
-  return withCost[0]?.tokens.planCostPerMonth ?? null;
-}
-
-export function mergeActivityReportData(reportDataList, { id, generatedAt, planCostPerMonthOverride = null } = {}) {
+export function mergeActivityReportData(reportDataList, { id, generatedAt } = {}) {
   const valid = reportDataList.filter(Boolean);
   if (valid.length < 2) {
     throw new Error(`mergeActivityReportData requires at least 2 report-data objects, got ${valid.length}`);
@@ -179,9 +168,6 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt, planC
   const recentTotalDurationMs = sumBy(valid, (rd) => rd.sessions?.recentWindow?.totalDurationMs);
   const worktreeLabels = unionArrays(valid.map((rd) => rd.worktrees?.projectTraceLabels ?? []));
   const projectList = unionArrays(valid.map((rd) => rd.projects?.list ?? []));
-  const mergedCoverage = activeDates.length ? buildCoverage(activeDates) : null;
-  const planCostPerMonth = pickPlanCostPerMonth(valid, planCostPerMonthOverride);
-  const mergedTokens = mergeTokens(valid);
 
   return {
     mode: 'visualise',
@@ -201,7 +187,7 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt, planC
       // schedule) doesn't collapse into one meaningful figure - see each source's own report instead.
       staleness: null,
     },
-    coverage: mergedCoverage,
+    coverage: activeDates.length ? buildCoverage(activeDates) : null,
     hourOfDay: mergeHourOfDay(valid),
     dailyActivity,
     recentDailyActivity,
@@ -220,7 +206,7 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt, planC
         avgDurationMs: recentSessionCount ? recentTotalDurationMs / recentSessionCount : null,
       },
     },
-    tokens: { ...mergedTokens, planCostPerMonth, actualSpend: buildActualSpend(planCostPerMonth, mergedCoverage) },
+    tokens: mergeTokens(valid),
     worktrees: {
       createdViaTool: sumBy(valid, (rd) => rd.worktrees?.createdViaTool),
       enteredViaTool: sumBy(valid, (rd) => rd.worktrees?.enteredViaTool),

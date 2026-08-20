@@ -14,7 +14,7 @@ export class MergeInputError extends Error {}
 // --visualise mode uses. Reads only the files named by --input; touches nothing else under ~/.claude
 // on this machine, so it is exactly as isolated from state.json/--baseline/--compare as --visualise
 // itself.
-export async function runMerge({ inputs, planCostPerMonth = null }) {
+export async function runMerge({ inputs }) {
   if (!inputs || inputs.length < 2) {
     throw new MergeInputError(`--merge needs at least 2 --input <path> files, got ${inputs?.length ?? 0}.`);
   }
@@ -40,7 +40,7 @@ export async function runMerge({ inputs, planCostPerMonth = null }) {
   const generatedAt = new Date().toISOString();
   let reportData;
   try {
-    reportData = mergeActivityReportData(reportDataList, { id, generatedAt, planCostPerMonthOverride: planCostPerMonth });
+    reportData = mergeActivityReportData(reportDataList, { id, generatedAt });
   } catch (e) {
     // Re-thrown as MergeInputError so the CLI prints a clean message instead of a stack trace - this
     // is a bad/mismatched input file, the same class of problem as an unreadable path above.
