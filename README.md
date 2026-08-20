@@ -47,10 +47,11 @@ See `--help` for all options (`--since-last`, `--min-n`, `--bootstrap-samples`, 
 A third, independent mode: not "what did it cost", but "what did you actually do" - sessions, an
 activity/hour-of-day pattern, total tokens, commits, worktrees created, and lines written.
 
-Its HTML report is styled deliberately differently from `--baseline`/`--compare`'s: a wide, light,
-large-type layout meant to be read from across a room (e.g. on a TV during a presentation), not just
-at a desk. This styling is self-contained to `--visualise`/`--merge` output and never touches
-`--baseline`/`--compare`'s report design.
+Every HTML report this tool generates - `--baseline`, `--compare`, `--visualise`, and `--merge` -
+shares one wide, light, large-type visual language meant to be read from across a room (e.g. on a TV
+during a presentation), not just at a desk. The shared palette/typography live in `src/report/html.js`
+(`STYLE` + `TV_STYLE`, the latter exported and reused by `visualiseHtml.js`), so every report reads as
+one product rather than several different-looking tools.
 
 It is deliberately isolated from `--baseline`/`--compare`:
 
