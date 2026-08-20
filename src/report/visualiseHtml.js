@@ -2,6 +2,12 @@
 // period this machine has data for". Same offline-safe, no-<script>, inline-SVG constraints as
 // html.js (see that file's header) - this is a second, unrelated report page reusing its STYLE
 // constant and the shared chart primitives, not a variant of the baseline/compare report itself.
+//
+// Designed to be read from across a room off a TV during a presentation: light and high-contrast
+// regardless of the viewing device's own dark-mode setting, a wide layout, and a large type scale.
+// TV_STYLE below is appended after STYLE in this page's own <style> tag only - it redeclares shared
+// tokens/classes (colors, .kpi, .wrap, chart text, etc.) for this document alone, so --baseline/
+// --compare (which never load TV_STYLE) keep their exact existing look untouched.
 
 import { STYLE } from './html.js';
 import { horizontalBars, stackedShareBar, timeSeriesBars, hourOfDayChart, fmtCompact } from './charts.js';
@@ -47,8 +53,12 @@ function fmtDuration(ms) {
   return `${h}h ${m}m`;
 }
 
-function section(title, bodyHtml, { lede } = {}) {
+// `eyebrow` renders as a shell-prompt-styled tag above the heading (e.g. "activity --hour-of-day") -
+// this report's one signature visual device, tying the page back to the fact that everything on it
+// was read out of a command-line tool. Used consistently, once per section, nowhere else.
+function section(title, bodyHtml, { lede, eyebrow } = {}) {
   return `<section>
+  ${eyebrow ? `<div class="eyebrow">${esc(eyebrow)}</div>` : ''}
   <h2>${esc(title)}</h2>
   ${lede ? `<p class="lede">${lede}</p>` : ''}
   ${bodyHtml}
@@ -97,14 +107,6 @@ function steadinessSection(rd) {
     .filter((d) => (d.messageCount ?? 0) > 0 || (d.sessionCount ?? 0) > 0)
     .map((d) => ({ label: d.date, value: d.messageCount, valueText: `${fmtInt(d.messageCount)} messages, ${fmtInt(d.sessionCount)} session(s)` }));
 
-  const recentRows = (rd.recentDailyActivity ?? [])
-    .filter((d) => (d.claudeEvents ?? 0) > 0 || (d.humanPrompts ?? 0) > 0)
-    .map((d) => ({
-      label: d.date,
-      value: d.claudeEvents,
-      valueText: `${fmtInt(d.claudeEvents)} Claude-working events, ${fmtInt(d.humanPrompts)} prompt(s), ${fmtInt(d.sessionsStarted)} session(s) started`,
-    }));
-
   // Plain em dashes here, not &mdash; - this string is passed through kpiCard(), which escapes its
   // meaning text (correctly, since most callers pass plain text), so an HTML entity here would come
   // out double-encoded as the literal text "&mdash;" instead of a dash.
@@ -129,12 +131,6 @@ function steadinessSection(rd) {
   <p class="muted">One bar per day the usage cache recorded any activity (${cachedRows.length} days), through ${esc(rd.period.lastComputedDate ?? 'its last computation')}. Gaps in the axis are days with zero activity, not zero-height bars.</p>`
     : '';
 
-  const recentChart = recentRows.length
-    ? `<h3>Claude-working events per day (recent, live from transcripts)</h3>
-  ${timeSeriesBars(recentRows, { valueLabel: 'Claude-working events per day' })}
-  <p class="muted">One bar per day still-on-disk transcripts recorded Claude working (${recentRows.length} days). Uses a different definition than the cached chart above (see &ldquo;How to read this page&rdquo;) - do not add the two together.</p>`
-    : '';
-
   const hodChart = hod
     ? `<h3>What hour of day work happens</h3>
   <p class="callout callout-info">This counts every assistant turn and tool round-trip as &ldquo;Claude working&rdquo;, across main sessions, subagents, and workflow agents - so a session you left running unattended overnight or for days shows up as hours of activity, not one entry at whatever hour you started it. &ldquo;Your prompts&rdquo; counts only genuine human-typed messages in main sessions, separately.</p>
@@ -148,7 +144,6 @@ function steadinessSection(rd) {
     ${hodCard}
   </div>
   ${cachedChart}
-  ${recentChart}
   ${hodChart}`;
 }
 
@@ -289,6 +284,99 @@ function methodSection(rd) {
 }
 
 // ---------------------------------------------------------------------------
+// TV presentation stylesheet
+// ---------------------------------------------------------------------------
+// Appended after STYLE, so every rule here is a deliberate override for this page alone: variables
+// redeclared in a later, unconditional :root block win over both STYLE's light AND (should the
+// viewing device prefer it) dark-mode :root blocks, which is what keeps this report light no matter
+// what the TV/browser's own theme is set to - a real risk otherwise, since STYLE's dark-mode block is
+// still present in the concatenated stylesheet.
+//
+// Relies on one mechanical fact about the existing charts: every chart's <svg> sets width="100%" and
+// a fixed viewBox with no CSS height, so the whole chart - bars, gaps, and every piece of text inside
+// it - already scales up uniformly as its container grows. Widening .wrap below is therefore most of
+// the "make this legible from across a room" work; the rest is bumping the HTML (non-SVG) text that
+// doesn't live inside an <svg> - headings, KPI numbers, table cells, legends, captions.
+const TV_STYLE = `
+  :root {
+    color-scheme: light;
+    --bg: #F2F6F4; --surface: #FFFFFF; --fg: #12191A; --muted: #45564F; --border: #D2DCD6;
+    --accent: #146C4E; --accent-soft: #E1F1E8;
+    --series-1: #146C4E; --series-2: #1D5C8F; --series-3: #B9821A; --series-4: #AC4630;
+    --good: #1C7A46; --bad: #AE3A2C; --warn: #B07419; --neutral: #45564F;
+    --good-bg: #E4F3E9; --bad-bg: #FAEAE7; --warn-bg: #FAF0DE; --info-bg: #E7F0F6; --neutral-bg: #EBF1EE;
+    --grid: #E1E9E5;
+    --font-sans: -apple-system, "Segoe UI", "Segoe UI Variable", Roboto, sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Consolas", "SFMono-Regular", Menlo, monospace;
+  }
+
+  body { font-family: var(--font-sans); line-height: 1.6; }
+  .wrap { max-width: 1680px; font-size: 1.05rem; }
+
+  h1 { font-family: var(--font-sans); font-size: 3.4rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 0.6rem; }
+  h2 { font-family: var(--font-sans); font-size: 2rem; font-weight: 750; border-bottom: none; padding-bottom: 0; margin-top: 3.75rem; letter-spacing: -0.01em; }
+  h3 { font-size: 1.35rem; margin-top: 2.25rem; }
+  p { font-size: 1.1rem; }
+  .lede { font-size: 1.25rem; max-width: 92ch; }
+  .muted { font-size: 1.02rem; }
+  code { font-size: 0.85em; }
+
+  /* Signature: a shell-prompt eyebrow above every section heading. */
+  .eyebrow { display: inline-flex; align-items: center; gap: 0.35em; font-family: var(--font-mono); font-size: 1.05rem;
+    font-weight: 600; letter-spacing: 0.01em; color: var(--accent); background: var(--accent-soft);
+    border: 1px solid var(--accent); border-radius: 999px; padding: 0.3rem 1.1rem 0.3rem 0.9rem; }
+  .eyebrow::before { content: "$"; opacity: 0.6; font-weight: 700; margin-right: 0.1em; }
+
+  /* KPI scoreboard */
+  .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+  .kpi { border-radius: 14px; padding: 1.5rem 1.6rem; }
+  .kpi-label { font-family: var(--font-mono); font-size: 0.95rem; letter-spacing: 0.05em; }
+  .kpi-values { margin: 0.55rem 0 0.2rem; }
+  .kpi-before { font-size: 1.1rem; }
+  .kpi-after { font-family: var(--font-mono); font-size: 2.75rem; font-weight: 700; }
+  .kpi-delta { font-size: 0.95rem; }
+  .kpi-meaning { font-size: 1.02rem; margin-top: 0.6rem; }
+
+  /* Meta strip */
+  .meta-grid { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0.9rem; }
+  .meta-item { border-radius: 12px; padding: 0.85rem 1.1rem; }
+  .meta-item .label { font-family: var(--font-mono); font-size: 0.88rem; }
+  .meta-item .value { font-size: 1.3rem; }
+  .meta-item.wide .value { font-size: 1.05rem; }
+
+  /* Callouts / explainers */
+  .callout { font-size: 1.08rem; padding: 1.2rem 1.4rem; border-radius: 12px; max-width: none; }
+  .explainer { padding: 1.6rem 1.85rem; border-radius: 14px; }
+  .explainer h3 { font-size: 1.2rem; }
+  .explainer p, .explainer li { font-size: 1.05rem; max-width: none; }
+  .reading { font-size: 1.05rem; max-width: none; }
+
+  /* Tables */
+  table { font-size: 1.05rem; }
+  th, td { padding: 0.7rem 1rem; }
+  th { font-family: var(--font-mono); font-size: 0.88rem; letter-spacing: 0.03em; text-transform: uppercase; }
+  .meaning-cell { font-size: 0.95rem; max-width: 48ch; }
+
+  /* Chart wrapper text that lives outside the <svg> - legends and captions don't scale with .wrap. */
+  .legend { font-size: 1.08rem; gap: 1.5rem; }
+  .swatch { width: 15px; height: 15px; border-radius: 4px; }
+  figcaption { font-size: 1rem; max-width: none; }
+  .grid { stroke-width: 1.4; }
+  .axis { stroke-width: 1.6; }
+
+  details > summary { font-size: 1.05rem; }
+  footer { font-size: 0.95rem; }
+  footer p { max-width: none; }
+
+  @media (max-width: 900px) {
+    .wrap { max-width: 100%; font-size: 1rem; }
+    h1 { font-size: 2.3rem; }
+    h2 { font-size: 1.5rem; }
+    .kpi-after { font-size: 2.1rem; }
+  }
+`;
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -326,13 +414,13 @@ export function renderVisualiseHtml(rd) {
   </div>
   ${sourcesPanel}
 
-  ${section('At a glance', headlineKpis(rd))}
-  ${section('How steady is your usage?', steadinessSection(rd), { lede: 'Claude Code is a CLI, not a server, so "uptime" here means presence: how many days you used it, and at what hours.' })}
-  ${section('Tokens and estimated spend', tokenSection(rd), { lede: 'All-time totals from Claude Code’s own usage cache, weighted the same way --baseline/--compare weight theirs.' })}
-  ${section('Git activity', gitSection(rd), { lede: 'From Bash and EnterWorktree tool calls in transcripts still on disk - subject to the ~30-day retention window described below.' })}
-  ${section('Code written', codeSection(rd))}
-  ${section('Tools, subagents and skills', toolsSection(rd))}
-  ${section('How to read this page', methodSection(rd))}
+  ${section('At a glance', headlineKpis(rd), { eyebrow: 'overview --scoreboard' })}
+  ${section('How steady is your usage?', steadinessSection(rd), { eyebrow: 'activity --hour-of-day', lede: 'Claude Code is a CLI, not a server, so "uptime" here means presence: how many days you used it, and at what hours.' })}
+  ${section('Tokens and estimated spend', tokenSection(rd), { eyebrow: 'tokens --spend', lede: 'All-time totals from Claude Code’s own usage cache, weighted the same way --baseline/--compare weight theirs.' })}
+  ${section('Git activity', gitSection(rd), { eyebrow: 'git log --stat', lede: 'From Bash and EnterWorktree tool calls in transcripts still on disk - subject to the ~30-day retention window described below.' })}
+  ${section('Code written', codeSection(rd), { eyebrow: 'diff --stat' })}
+  ${section('Tools, subagents and skills', toolsSection(rd), { eyebrow: 'tools --top' })}
+  ${section('How to read this page', methodSection(rd), { eyebrow: '--help' })}
 
   <footer>
     <p>Generated by claude-usage-baseliner --visualise. This report is independent of, and does not read or write, the state used by --baseline/--compare.</p>
@@ -345,7 +433,7 @@ export function renderVisualiseHtml(rd) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>What you did with Claude - ${esc(rd.id)}</title>
-<style>${STYLE}</style>
+<style>${STYLE}${TV_STYLE}</style>
 </head>
 <body>
 ${body}
