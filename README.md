@@ -91,6 +91,15 @@ subagent's opening message is its parent's injected task text, not something you
 unattended multi-hour or multi-day run should show up as hours of Claude-working activity, not one
 entry at whatever hour it was started.
 
+**A stale cache blocks the run by default.** `/stats` inside Claude Code is the only known way to
+force a recompute (see below), so `--visualise` checks `lastComputedDate` before scanning anything: if
+the cache is more than `--max-cache-age` days old (default 2), it prompts to continue anyway when run
+interactively, or refuses outright with a one-line error when not (e.g. in a script or CI). Pass
+`--allow-stale-cache` to skip the check entirely, or a larger `--max-cache-age <days>` to raise the
+threshold. This exists because the only fix for stale session/message *counts* (as opposed to token
+totals, see below) is to actually refresh the cache - there's no live substitute for history older than
+the ~30-day transcript retention window.
+
 **`stats-cache.json` can be stale, and token/model totals are supplemented for it.** The cache is
 recomputed by Claude Code itself on its own schedule, not on every run - `lastComputedDate` (shown at
 the top of the report) can lag behind today by weeks, which previously hid any model adopted after

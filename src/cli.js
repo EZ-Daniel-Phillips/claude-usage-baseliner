@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util';
 import { resolveConfig } from './config.js';
 import { runBaseline } from './commands/baselineCommand.js';
 import { runCompare, NoBaselineError } from './commands/compareCommand.js';
-import { runVisualise } from './commands/visualiseCommand.js';
+import { runVisualise, StaleCacheError } from './commands/visualiseCommand.js';
 import { runMerge, MergeInputError } from './commands/mergeCommand.js';
 import { setVerbosity, error } from './util/log.js';
 
@@ -34,6 +34,11 @@ Options:
   --since-last            With --compare, measure only what is new since the previous scan instead
                           of everything since the baseline. Consumes that window: the next run will
                           not see it again.
+  --max-cache-age <days>  With --visualise, how many days stale stats-cache.json may be before the
+                          run prompts (interactive) or refuses (non-interactive) to continue. Run
+                          /stats in Claude Code to refresh it. Default: 2.
+  --allow-stale-cache     With --visualise, skip the stale-cache prompt/check entirely and proceed
+                          no matter how old stats-cache.json is.
   --claude-dir <path>     Directory to scan (default: ~/.claude).
   --min-n <int>           Minimum sample size per side before running significance tests (default: 10).
   --bootstrap-samples <n> Resample count for percentile bootstrap CIs (default: 1500).
@@ -57,6 +62,8 @@ export async function main(argv) {
         'claude-dir': { type: 'string' },
         'min-n': { type: 'string' },
         'bootstrap-samples': { type: 'string' },
+        'max-cache-age': { type: 'string' },
+        'allow-stale-cache': { type: 'boolean' },
         quiet: { type: 'boolean' },
         verbose: { type: 'boolean' },
         help: { type: 'boolean' },
@@ -96,7 +103,7 @@ export async function main(argv) {
     }
     return 0;
   } catch (e) {
-    if (e instanceof NoBaselineError || e instanceof MergeInputError) {
+    if (e instanceof NoBaselineError || e instanceof MergeInputError || e instanceof StaleCacheError) {
       error(e.message);
       return 1;
     }
