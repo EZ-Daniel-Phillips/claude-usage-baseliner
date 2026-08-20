@@ -1,15 +1,15 @@
 // Renders the self-contained --visualise dashboard: "what did you actually do with Claude over the
 // period this machine has data for". Same offline-safe, no-<script>, inline-SVG constraints as
-// html.js (see that file's header) - this is a second, unrelated report page reusing its STYLE
-// constant and the shared chart primitives, not a variant of the baseline/compare report itself.
+// html.js (see that file's header) - this is a second report page reusing its STYLE/TV_STYLE
+// constants and the shared chart primitives, not a variant of the baseline/compare report itself.
 //
 // Designed to be read from across a room off a TV during a presentation: light and high-contrast
 // regardless of the viewing device's own dark-mode setting, a wide layout, and a large type scale.
-// TV_STYLE below is appended after STYLE in this page's own <style> tag only - it redeclares shared
-// tokens/classes (colors, .kpi, .wrap, chart text, etc.) for this document alone, so --baseline/
-// --compare (which never load TV_STYLE) keep their exact existing look untouched.
+// TV_STYLE (defined in html.js, shared with --baseline/--compare) is appended after STYLE in this
+// page's own <style> tag - see its header comment in html.js for why it stays light no matter what
+// the TV/browser's own theme is set to.
 
-import { STYLE } from './html.js';
+import { STYLE, TV_STYLE } from './html.js';
 import { horizontalBars, stackedShareBar, timeSeriesBars, hourOfDayChart, fmtCompact } from './charts.js';
 import { BUSINESS_HOUR_START, BUSINESS_HOUR_END } from './activityMetrics.js';
 
@@ -282,99 +282,6 @@ function methodSection(rd) {
     <p>As with <code>--baseline</code>/<code>--compare</code>, cost figures here are computed at published Claude API list rates and are not billing data - useful for a consistent sense of scale, not as an amount anyone invoiced you.</p>
   </div>`;
 }
-
-// ---------------------------------------------------------------------------
-// TV presentation stylesheet
-// ---------------------------------------------------------------------------
-// Appended after STYLE, so every rule here is a deliberate override for this page alone: variables
-// redeclared in a later, unconditional :root block win over both STYLE's light AND (should the
-// viewing device prefer it) dark-mode :root blocks, which is what keeps this report light no matter
-// what the TV/browser's own theme is set to - a real risk otherwise, since STYLE's dark-mode block is
-// still present in the concatenated stylesheet.
-//
-// Relies on one mechanical fact about the existing charts: every chart's <svg> sets width="100%" and
-// a fixed viewBox with no CSS height, so the whole chart - bars, gaps, and every piece of text inside
-// it - already scales up uniformly as its container grows. Widening .wrap below is therefore most of
-// the "make this legible from across a room" work; the rest is bumping the HTML (non-SVG) text that
-// doesn't live inside an <svg> - headings, KPI numbers, table cells, legends, captions.
-const TV_STYLE = `
-  :root {
-    color-scheme: light;
-    --bg: #F2F6F4; --surface: #FFFFFF; --fg: #12191A; --muted: #45564F; --border: #D2DCD6;
-    --accent: #146C4E; --accent-soft: #E1F1E8;
-    --series-1: #146C4E; --series-2: #1D5C8F; --series-3: #B9821A; --series-4: #AC4630;
-    --good: #1C7A46; --bad: #AE3A2C; --warn: #B07419; --neutral: #45564F;
-    --good-bg: #E4F3E9; --bad-bg: #FAEAE7; --warn-bg: #FAF0DE; --info-bg: #E7F0F6; --neutral-bg: #EBF1EE;
-    --grid: #E1E9E5;
-    --font-sans: -apple-system, "Segoe UI", "Segoe UI Variable", Roboto, sans-serif;
-    --font-mono: ui-monospace, "Cascadia Mono", "Consolas", "SFMono-Regular", Menlo, monospace;
-  }
-
-  body { font-family: var(--font-sans); line-height: 1.6; }
-  .wrap { max-width: 1680px; font-size: 1.05rem; }
-
-  h1 { font-family: var(--font-sans); font-size: 3.4rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 0.6rem; }
-  h2 { font-family: var(--font-sans); font-size: 2rem; font-weight: 750; border-bottom: none; padding-bottom: 0; margin-top: 3.75rem; letter-spacing: -0.01em; }
-  h3 { font-size: 1.35rem; margin-top: 2.25rem; }
-  p { font-size: 1.1rem; }
-  .lede { font-size: 1.25rem; max-width: 92ch; }
-  .muted { font-size: 1.02rem; }
-  code { font-size: 0.85em; }
-
-  /* Signature: a shell-prompt eyebrow above every section heading. */
-  .eyebrow { display: inline-flex; align-items: center; gap: 0.35em; font-family: var(--font-mono); font-size: 1.05rem;
-    font-weight: 600; letter-spacing: 0.01em; color: var(--accent); background: var(--accent-soft);
-    border: 1px solid var(--accent); border-radius: 999px; padding: 0.3rem 1.1rem 0.3rem 0.9rem; }
-  .eyebrow::before { content: "$"; opacity: 0.6; font-weight: 700; margin-right: 0.1em; }
-
-  /* KPI scoreboard */
-  .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
-  .kpi { border-radius: 14px; padding: 1.5rem 1.6rem; }
-  .kpi-label { font-family: var(--font-mono); font-size: 0.95rem; letter-spacing: 0.05em; }
-  .kpi-values { margin: 0.55rem 0 0.2rem; }
-  .kpi-before { font-size: 1.1rem; }
-  .kpi-after { font-family: var(--font-mono); font-size: 2.75rem; font-weight: 700; }
-  .kpi-delta { font-size: 0.95rem; }
-  .kpi-meaning { font-size: 1.02rem; margin-top: 0.6rem; }
-
-  /* Meta strip */
-  .meta-grid { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0.9rem; }
-  .meta-item { border-radius: 12px; padding: 0.85rem 1.1rem; }
-  .meta-item .label { font-family: var(--font-mono); font-size: 0.88rem; }
-  .meta-item .value { font-size: 1.3rem; }
-  .meta-item.wide .value { font-size: 1.05rem; }
-
-  /* Callouts / explainers */
-  .callout { font-size: 1.08rem; padding: 1.2rem 1.4rem; border-radius: 12px; max-width: none; }
-  .explainer { padding: 1.6rem 1.85rem; border-radius: 14px; }
-  .explainer h3 { font-size: 1.2rem; }
-  .explainer p, .explainer li { font-size: 1.05rem; max-width: none; }
-  .reading { font-size: 1.05rem; max-width: none; }
-
-  /* Tables */
-  table { font-size: 1.05rem; }
-  th, td { padding: 0.7rem 1rem; }
-  th { font-family: var(--font-mono); font-size: 0.88rem; letter-spacing: 0.03em; text-transform: uppercase; }
-  .meaning-cell { font-size: 0.95rem; max-width: 48ch; }
-
-  /* Chart wrapper text that lives outside the <svg> - legends and captions don't scale with .wrap. */
-  .legend { font-size: 1.08rem; gap: 1.5rem; }
-  .swatch { width: 15px; height: 15px; border-radius: 4px; }
-  figcaption { font-size: 1rem; max-width: none; }
-  .grid { stroke-width: 1.4; }
-  .axis { stroke-width: 1.6; }
-
-  details > summary { font-size: 1.05rem; }
-  footer { font-size: 0.95rem; }
-  footer p { max-width: none; }
-
-  @media (max-width: 900px) {
-    .wrap { max-width: 100%; font-size: 1rem; }
-    h1 { font-size: 2.3rem; }
-    h2 { font-size: 1.5rem; }
-    .kpi-after { font-size: 2.1rem; }
-  }
-`;
 
 // ---------------------------------------------------------------------------
 // Entry point

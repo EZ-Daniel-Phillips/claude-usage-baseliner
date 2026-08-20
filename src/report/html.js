@@ -5,6 +5,10 @@
 // Reading order is deliberate and top-down: the verdict first, then what changed and what that means,
 // then where the change came from, then the evidence, then the raw tables. A reader who stops after
 // the first screen should still have the correct answer.
+//
+// STYLE + TV_STYLE together are this tool's one visual language, shared by every report it generates
+// (--baseline, --compare, --visualise, --merge) - see TV_STYLE's own header comment further down for
+// why it is light/high-contrast and legible from across a room regardless of viewing device.
 
 import { distributionChart, beforeAfterBars, stackedShareBar, horizontalBars, waterfallChart, fmtCompact } from './charts.js';
 
@@ -70,8 +74,12 @@ function lowConfBadge(isLow) {
   return isLow ? badge('low confidence (fewer than 20 samples)', 'warn') : '';
 }
 
-function section(title, bodyHtml, { id, lede } = {}) {
+// `eyebrow` renders as a shell-prompt-styled tag above the heading (e.g. "verdict --answer") - the
+// same signature device visualiseHtml.js uses, so a baseline/compare report and a --visualise report
+// read as one consistent product rather than two different tools.
+function section(title, bodyHtml, { id, lede, eyebrow } = {}) {
   return `<section${id ? ` id="${esc(id)}"` : ''}>
+  ${eyebrow ? `<div class="eyebrow">${esc(eyebrow)}</div>` : ''}
   <h2>${esc(title)}</h2>
   ${lede ? `<p class="lede">${lede}</p>` : ''}
   ${bodyHtml}
@@ -719,8 +727,8 @@ function methodExplainer(reportData) {
 // Styles
 // ---------------------------------------------------------------------------
 
-// Exported so visualise.js can build a second, unrelated report page in the same visual language
-// without duplicating the palette/typography - purely a shared read-only constant, not a functional
+// Exported so visualiseHtml.js can build a second report page in the same visual language without
+// duplicating the palette/typography - purely a shared read-only constant, not a functional
 // dependency on baseline/compare behaviour.
 export const STYLE = `
   :root {
@@ -874,6 +882,120 @@ export const STYLE = `
 `;
 
 // ---------------------------------------------------------------------------
+// Presentation stylesheet (TV / large-screen viewing)
+// ---------------------------------------------------------------------------
+// Appended after STYLE in every report this tool generates (--baseline, --compare, --visualise,
+// --merge), so all of them share one signature look rather than reading as different tools. Every
+// rule here is a deliberate override: variables redeclared in a later, unconditional :root block win
+// over both STYLE's light AND (should the viewing device prefer it) dark-mode :root blocks, which is
+// what keeps every report light no matter what the TV/browser's own theme is set to.
+//
+// Relies on one mechanical fact about the existing charts: every chart's <svg> sets width="100%" and
+// a fixed viewBox with no CSS height, so the whole chart - bars, gaps, and every piece of text inside
+// it - already scales up uniformly as its container grows. Widening .wrap below is therefore most of
+// the "make this legible from across a room" work; the rest is bumping the HTML (non-SVG) text that
+// doesn't live inside an <svg> - headings, KPI numbers, table cells, legends, captions, and (for
+// --baseline/--compare specifically) the verdict hero number and findings list.
+export const TV_STYLE = `
+  :root {
+    color-scheme: light;
+    --bg: #F2F6F4; --surface: #FFFFFF; --fg: #12191A; --muted: #45564F; --border: #D2DCD6;
+    --accent: #146C4E; --accent-soft: #E1F1E8;
+    --series-1: #146C4E; --series-2: #1D5C8F; --series-3: #B9821A; --series-4: #AC4630;
+    --good: #1C7A46; --bad: #AE3A2C; --warn: #B07419; --neutral: #45564F;
+    --good-bg: #E4F3E9; --bad-bg: #FAEAE7; --warn-bg: #FAF0DE; --info-bg: #E7F0F6; --neutral-bg: #EBF1EE;
+    --grid: #E1E9E5;
+    --font-sans: -apple-system, "Segoe UI", "Segoe UI Variable", Roboto, sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Consolas", "SFMono-Regular", Menlo, monospace;
+  }
+
+  body { font-family: var(--font-sans); line-height: 1.6; }
+  .wrap { max-width: 1680px; font-size: 1.05rem; }
+
+  h1 { font-family: var(--font-sans); font-size: 3.4rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 0.6rem; }
+  h2 { font-family: var(--font-sans); font-size: 2rem; font-weight: 750; border-bottom: none; padding-bottom: 0; margin-top: 3.75rem; letter-spacing: -0.01em; }
+  h3 { font-size: 1.35rem; margin-top: 2.25rem; }
+  p { font-size: 1.1rem; }
+  .lede { font-size: 1.25rem; max-width: 92ch; }
+  .muted { font-size: 1.02rem; }
+  code { font-size: 0.85em; }
+
+  /* Signature: a shell-prompt eyebrow above every section heading. */
+  .eyebrow { display: inline-flex; align-items: center; gap: 0.35em; font-family: var(--font-mono); font-size: 1.05rem;
+    font-weight: 600; letter-spacing: 0.01em; color: var(--accent); background: var(--accent-soft);
+    border: 1px solid var(--accent); border-radius: 999px; padding: 0.3rem 1.1rem 0.3rem 0.9rem; }
+  .eyebrow::before { content: "$"; opacity: 0.6; font-weight: 700; margin-right: 0.1em; }
+
+  /* KPI scoreboard */
+  .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+  .kpi { border-radius: 14px; padding: 1.5rem 1.6rem; }
+  .kpi-label { font-family: var(--font-mono); font-size: 0.95rem; letter-spacing: 0.05em; }
+  .kpi-values { margin: 0.55rem 0 0.2rem; }
+  .kpi-before { font-size: 1.1rem; }
+  .kpi-after { font-family: var(--font-mono); font-size: 2.75rem; font-weight: 700; }
+  .kpi-delta { font-size: 0.95rem; }
+  .kpi-meaning { font-size: 1.02rem; margin-top: 0.6rem; }
+
+  /* Meta strip */
+  .meta-grid { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0.9rem; }
+  .meta-item { border-radius: 12px; padding: 0.85rem 1.1rem; }
+  .meta-item .label { font-family: var(--font-mono); font-size: 0.88rem; }
+  .meta-item .value { font-size: 1.3rem; }
+  .meta-item.wide .value { font-size: 1.05rem; }
+
+  /* Callouts / explainers */
+  .callout { font-size: 1.08rem; padding: 1.2rem 1.4rem; border-radius: 12px; max-width: none; }
+  .explainer { padding: 1.6rem 1.85rem; border-radius: 14px; }
+  .explainer h3 { font-size: 1.2rem; }
+  .explainer p, .explainer li { font-size: 1.05rem; max-width: none; }
+  .reading { font-size: 1.05rem; max-width: none; }
+
+  /* Tables */
+  table { font-size: 1.05rem; }
+  th, td { padding: 0.7rem 1rem; }
+  th { font-family: var(--font-mono); font-size: 0.88rem; letter-spacing: 0.03em; text-transform: uppercase; }
+  .meaning-cell { font-size: 0.95rem; max-width: 48ch; }
+
+  /* Chart wrapper text that lives outside the <svg> - legends and captions don't scale with .wrap. */
+  .legend { font-size: 1.08rem; gap: 1.5rem; }
+  .swatch { width: 15px; height: 15px; border-radius: 4px; }
+  figcaption { font-size: 1rem; max-width: none; }
+  .grid { stroke-width: 1.4; }
+  .axis { stroke-width: 1.6; }
+
+  details > summary { font-size: 1.05rem; }
+  footer { font-size: 0.95rem; }
+  footer p { max-width: none; }
+
+  /* Verdict hero (--compare only) - the single biggest number on any report this tool generates,
+     so it gets the largest type treatment on the page. */
+  .verdict { border-radius: 16px; padding: 2rem 2.25rem; gap: 2.25rem; grid-template-columns: minmax(240px, 320px) 1fr; }
+  .hero-number { font-family: var(--font-mono); font-size: 4.5rem; }
+  .hero-caption { font-size: 1.12rem; margin-top: 0.65rem; }
+  .verdict-answer { font-size: 1.35rem; }
+  .sig { font-size: 1.05rem; padding-top: 0.9rem; }
+  .quality-warn { font-size: 1.05rem; padding: 1rem 1.25rem; }
+
+  /* Findings list */
+  .findings { gap: 0.9rem; }
+  .finding { padding: 1.1rem 1.3rem; border-radius: 12px; }
+  .finding-tag { font-size: 0.78rem; }
+  .finding-title { font-size: 1.15rem; }
+  .finding-meaning { font-size: 1rem; max-width: none; }
+
+  .badge { font-size: 0.82rem; padding: 0.15rem 0.65rem; }
+
+  @media (max-width: 900px) {
+    .wrap { max-width: 100%; font-size: 1rem; }
+    h1 { font-size: 2.3rem; }
+    h2 { font-size: 1.5rem; }
+    .kpi-after { font-size: 2.1rem; }
+    .hero-number { font-size: 3.2rem; }
+    .verdict { grid-template-columns: 1fr; }
+  }
+`;
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -922,39 +1044,48 @@ export function renderHtmlReport(reportData) {
     isCompare && cmp
       ? `${verdictSection(reportData)}
   ${section('What changed, and what it means', findingsSection(cmp.insights.findings), {
+    eyebrow: 'changes --findings',
     lede: 'Each item below is a metric that moved enough to be worth your attention, with what it actually tells you about your setup.',
   })}
   ${section('The numbers behind that verdict', kpiSection(cmp.insights.kpis), {
+    eyebrow: 'kpi --before-after',
     lede: 'Every figure is per request, so the two periods stay comparable even though one covers far more activity than the other.',
   })}
   ${section('Where the change came from', decompositionSection(cmp.decomposition), {
+    eyebrow: 'cost --decompose',
     lede: 'Splitting the change in cost per request into the things that actually caused it. Bars below the line saved you money; bars above it cost you money.',
   })}
   ${section('Did it actually get better, or just cheaper?', qualitySection(cmp), {
+    eyebrow: 'quality --check',
     lede: 'Cost tells you what you spent, not whether the work was any good. This is the only quality signal the transcripts carry.',
   })}
   ${section('Like-for-like, job by job', agentTypeSection(cmp), {
+    eyebrow: 'jobs --by-agent-type',
     lede: 'Each row is one agent type compared against itself. This is the closest this data gets to &ldquo;did that specific campaign improve?&rdquo;',
   })}
   ${section('Like-for-like, model by model', modelComparisonSection(cmp), {
+    eyebrow: 'models --by-model',
     lede: 'The honesty check. An overall improvement can be manufactured simply by running more work on a cheaper model, so this section compares each model only against itself.',
   })}`
-      : `${section('Where you stand today', baselineStanding(reportData))}`
+      : `${section('Where you stand today', baselineStanding(reportData), { eyebrow: 'baseline --standing' })}`
   }
 
   ${section('How big is a typical request?', distributionSection(reportData), {
+    eyebrow: 'requests --distribution',
     lede: 'This is the chart that makes percentiles concrete. Everything else on this page is a summary of what you can see here directly.',
   })}
 
   ${section('Where your tokens actually go', tokenClassExplainer(reportData), {
+    eyebrow: 'tokens --classes',
     lede: 'Not all tokens cost the same. Understanding this is the difference between a number that looks alarming and one that matters.',
   })}
 
   ${section('Your biggest levers', toolPayloadSection(reportData.toolPayload, reportData.totals.requests), {
+    eyebrow: 'tools --levers',
     lede: 'Concrete, actionable places where context gets consumed - ranked so you know what to trim first.',
   })}
 
-  ${section('How to read this report', methodExplainer(reportData))}
+  ${section('How to read this report', methodExplainer(reportData), { eyebrow: '--help' })}
 
   <h2>Full detail</h2>
   <details><summary>Breakdown by tier</summary>${tierBreakdownTable(reportData.byTier)}</details>
@@ -983,7 +1114,7 @@ export function renderHtmlReport(reportData) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} - ${esc(reportData.id)}</title>
-<style>${STYLE}</style>
+<style>${STYLE}${TV_STYLE}</style>
 </head>
 <body>
 ${body}
