@@ -22,9 +22,10 @@ Options:
   --baseline              Scan everything available and establish a fresh reference point.
   --compare               Measure all activity since the last baseline and compare against it.
   --visualise             Build a dashboard of what you've done with Claude over its whole usage
-                          history (sessions, uptime pattern, tokens, commits, worktrees, PRs, lines
-                          written). Independent of --baseline/--compare: never reads or writes
-                          state.json, and writes its own report under claude-usage-baseliner/visualise/.
+                          history (sessions, activity/hour-of-day pattern, tokens, commits,
+                          worktrees, lines written). Independent of --baseline/--compare: never reads
+                          or writes state.json, and writes its own report under
+                          claude-usage-baseliner/visualise/.
   --merge                 Combine two or more --visualise JSON reports (e.g. one dumped from each of
                           several machines) into a single merged JSON+HTML report. Pass each file with
                           its own --input.

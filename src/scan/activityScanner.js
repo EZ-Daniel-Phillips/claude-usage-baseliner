@@ -4,26 +4,27 @@ import { readLinesFrom } from './jsonlReader.js';
 import { verbose } from '../util/log.js';
 
 // Independent, read-only pass over the same transcript corpus scanner.js reads, but for a different
-// question: not "what did requests cost", but "what did you actually do" - commits, worktrees, PRs
-// worked via gh, lines written, sessions, agents spawned. Deliberately its own walk rather than a
-// second consumer of scanCorpus()'s output: it shares no state with the baseline/compare cursor or
-// dedupe machinery (state/cursor.js, scan/dedupe.js), so nothing --visualise does can perturb what
-// --baseline/--compare see or persist. It also does not require a completed usage record (a message
-// with token usage) the way recordParser.js does, so it sees tool calls scanner.js would ignore.
+// question: not "what did requests cost", but "what did you actually do" - commits, worktrees, lines
+// written, sessions, agents spawned. Deliberately its own walk rather than a second consumer of
+// scanCorpus()'s output: it shares no state with the baseline/compare cursor or dedupe machinery
+// (state/cursor.js, scan/dedupe.js), so nothing --visualise does can perturb what --baseline/--compare
+// see or persist. It also does not require a completed usage record (a message with token usage) the
+// way recordParser.js does, so it sees tool calls scanner.js would ignore.
 //
 // This is a single unbounded read of every transcript on disk every run - there is no cursor to
 // resume from, because there is no state.json entry for this mode to advance. On the corpus this was
 // built against (~1,400 files) that is the same ballpark cost as a cumulative --compare.
+//
+// Deliberately does NOT track `gh pr` commands - it was tried and removed. Counting `gh pr create`
+// invocations only sees PRs raised through the gh CLI, within whatever ~30-day window of transcripts
+// is still on disk, and reporting that alongside the (also unreliable) gh-pr-status-cache.json count
+// as "pull requests raised" was misleading rather than merely approximate. See activityMetrics.js.
 
 const BASH_PATTERNS = {
   gitCommit: /\bgit\s+(?:-\S+\s+)*commit\b/i,
   gitPush: /\bgit\s+(?:-\S+\s+)*push\b/i,
   gitWorktreeAdd: /\bgit\s+worktree\s+add\b/i,
   gitWorktreeRemove: /\bgit\s+worktree\s+remove\b/i,
-  ghPrCreate: /\bgh\s+pr\s+create\b/i,
-  ghPrMerge: /\bgh\s+pr\s+merge\b/i,
-  ghPrReview: /\bgh\s+pr\s+review\b/i,
-  ghPrComment: /\bgh\s+pr\s+comment\b/i,
 };
 
 // Sanitized project directory names replace path separators with '-', so a cwd ending in
@@ -46,7 +47,7 @@ export async function scanActivity(claudeDir) {
   const worktreeProjects = new Map(); // worktree label -> project name it appeared under
   const workflowRuns = new Set();
   const toolCallCounts = new Map(); // toolName -> calls
-  const bashCounts = { gitCommit: 0, gitPush: 0, gitWorktreeAdd: 0, gitWorktreeRemove: 0, ghPrCreate: 0, ghPrMerge: 0, ghPrReview: 0, ghPrComment: 0 };
+  const bashCounts = { gitCommit: 0, gitPush: 0, gitWorktreeAdd: 0, gitWorktreeRemove: 0 };
   let worktreesCreatedViaTool = 0;
   let worktreesEnteredViaTool = 0;
   const worktreeToolNames = new Set();

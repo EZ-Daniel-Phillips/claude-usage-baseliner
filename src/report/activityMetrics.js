@@ -1,13 +1,20 @@
 import { estimateCostByModel, COST_MODEL_NOTES } from './cost.js';
 
 // Assembles the report-data object for --visualise from two independent, read-only sources:
-//   - rootStats: Claude Code's own stats-cache.json + gh-pr-status-cache.json (survive transcript
-//     rotation, so they cover the tool's *entire* history, not just the last ~30 days)
+//   - rootStats: Claude Code's own stats-cache.json (survives transcript rotation, so it covers the
+//     tool's *entire* history, not just the last ~30 days)
 //   - activityScan: this run's fresh walk of transcripts still on disk (scan/activityScanner.js),
-//     which sees things the caches do not - commits, worktrees, PRs raised via gh, lines written
+//     which sees things the cache does not - commits, worktrees, lines written
 //
 // Neither source is shared with buildReportData() (report/metrics.js) or with state.json, so nothing
 // here can affect --baseline/--compare's numbers or their stored reference point.
+//
+// Deliberately does NOT report pull-request counts. gh-pr-status-cache.json turned out to be a small
+// rolling status-poll cache (whatever PRs the status line last checked), not a ledger, so "PRs raised"
+// read from it was a silent, large undercount - and the gh-CLI command counts from transcripts are no
+// more trustworthy (they only see the last ~30 days, and only PRs actually created *through* the gh
+// CLI). Neither signal is reliable enough to report as a metric, so this was removed rather than kept
+// with caveats.
 
 function daysBetween(aIso, bIso) {
   const a = Date.parse(aIso);
@@ -20,9 +27,9 @@ function daysBetween(aIso, bIso) {
 // of active days and the longest silent gap - three different ways of answering "was this steady
 // daily use, or a handful of bursts", which a single percentage cannot distinguish on its own.
 //
-// Exported (along with buildHourOfDay/buildPrSummary below) so report/mergeActivity.js can recompute
-// these from combined raw data rather than trying to average two already-derived summaries, which
-// would be wrong for anything path-dependent (streaks, gaps, hour spread).
+// Exported (along with buildHourOfDay below) so report/mergeActivity.js can recompute these from
+// combined raw data rather than trying to average two already-derived summaries, which would be
+// wrong for anything path-dependent (streaks, gaps, hour spread).
 export function buildCoverage(dailyActivity) {
   if (!dailyActivity.length) return null;
   const dates = [...new Set(dailyActivity.filter((d) => d.messageCount > 0 || d.sessionCount > 0).map((d) => d.date))].sort();
@@ -107,43 +114,11 @@ function sumModelUsageTokens(modelUsage) {
   return { byModel, totals };
 }
 
-// `all` is kept in full (not just the top-N shown in the report) so report/mergeActivity.js can
-// dedupe by URL across two machines' caches exactly, instead of trying to reconcile two already-
-// truncated top-10 lists. The HTML layer slices to a display-sized list itself.
-export function buildPrSummary(prs) {
-  if (!prs) return null;
-  const byState = {};
-  const byReview = { APPROVED: 0, CHANGES_REQUESTED: 0, COMMENTED: 0, none: 0 };
-  let additions = 0;
-  let deletions = 0;
-  for (const pr of prs) {
-    byState[pr.state] = (byState[pr.state] ?? 0) + 1;
-    const key = pr.review && byReview[pr.review] !== undefined ? pr.review : pr.review ? 'other' : 'none';
-    byReview[key] = (byReview[key] ?? 0) + 1;
-    additions += pr.additions;
-    deletions += pr.deletions;
-  }
-  const all = [...prs]
-    .sort((a, b) => b.additions + b.deletions - (a.additions + a.deletions))
-    .map((pr) => ({ number: pr.number, title: pr.title, state: pr.state, review: pr.review, additions: pr.additions, deletions: pr.deletions, url: pr.url }));
-  return {
-    total: prs.length,
-    byState,
-    byReview,
-    reviewedCount: prs.length - byReview.none,
-    additions,
-    deletions,
-    linesChanged: additions + deletions,
-    all,
-  };
-}
-
-export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache, ghPrs, activityScan }) {
+export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache, activityScan }) {
   const coverage = statsCache ? buildCoverage(statsCache.dailyActivity) : null;
   const hourOfDay = statsCache ? buildHourOfDay(statsCache.hourCounts) : null;
   const tokenSummary = statsCache ? sumModelUsageTokens(statsCache.modelUsage) : { byModel: [], totals: null };
   const cost = tokenSummary.byModel.length ? estimateCostByModel(tokenSummary.byModel) : null;
-  const prSummary = buildPrSummary(ghPrs);
 
   const recentSessions = activityScan.sessions.filter((s) => s.durationMs !== null);
   const recentTotalDurationMs = recentSessions.reduce((a, s) => a + s.durationMs, 0);
@@ -155,7 +130,6 @@ export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache
     claudeDir,
     dataAvailability: {
       hasStatsCache: statsCache !== null,
-      hasGhPrCache: ghPrs !== null,
     },
     period: {
       firstSessionDate: statsCache?.firstSessionDate ?? null,
@@ -194,13 +168,6 @@ export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache
     git: {
       commits: activityScan.bash.gitCommit,
       pushes: activityScan.bash.gitPush,
-    },
-    github: {
-      prCreateCommands: activityScan.bash.ghPrCreate,
-      prMergeCommands: activityScan.bash.ghPrMerge,
-      prReviewCommands: activityScan.bash.ghPrReview,
-      prCommentCommands: activityScan.bash.ghPrComment,
-      prs: prSummary,
     },
     code: {
       linesWritten: activityScan.loc.linesWritten,

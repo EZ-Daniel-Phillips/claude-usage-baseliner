@@ -1,5 +1,5 @@
 import { estimateCostByModel, COST_MODEL_NOTES } from './cost.js';
-import { buildCoverage, buildHourOfDay, buildPrSummary } from './activityMetrics.js';
+import { buildCoverage, buildHourOfDay } from './activityMetrics.js';
 
 // Combines two or more --visualise report-data objects (the JSON --visualise writes) into one, so
 // activity from separate machines - each with its own ~/.claude, its own stats-cache.json, its own
@@ -11,9 +11,9 @@ import { buildCoverage, buildHourOfDay, buildPrSummary } from './activityMetrics
 // summed or averaged - see each block's comment. The two load-bearing distinctions:
 //   - SUM when two sources' activity is genuinely independent (their own sessions, their own commits,
 //     their own token usage - nothing here can appear on more than one machine).
-//   - DEDUPE/RECOMPUTE when two sources could observe the *same* real-world thing (the same PR
-//     checked from both machines; two overlapping calendar dates; the derived streak/gap statistics,
-//     which are path-dependent and would be wrong if merged by averaging).
+//   - DEDUPE/RECOMPUTE when two sources could observe the *same* real-world thing (two overlapping
+//     calendar dates; the derived streak/gap statistics, which are path-dependent and would be wrong
+//     if merged by averaging).
 
 function sumBy(list, fn) {
   return list.reduce((a, x) => a + (fn(x) ?? 0), 0);
@@ -107,19 +107,6 @@ function mergeTokens(list) {
   return { totals, byModel: byModelArr, cost, costModelNotes: COST_MODEL_NOTES };
 }
 
-// Pull requests are the one entity that can genuinely be observed by more than one machine (the same
-// PR, checked from both) - a plain sum would double-count it, so this dedupes by URL instead. Where
-// sources disagree on a PR's cached state (stale poll on one side), the source that was generated
-// most recently wins, since its cache read is the freshest.
-function mergePrs(list) {
-  const withGeneratedAt = [...list].sort((a, b) => (a.generatedAt < b.generatedAt ? -1 : a.generatedAt > b.generatedAt ? 1 : 0));
-  const byUrl = new Map();
-  for (const rd of withGeneratedAt) {
-    for (const pr of rd.github?.prs?.all ?? []) byUrl.set(pr.url, pr); // later (fresher) source overwrites
-  }
-  return byUrl.size ? [...byUrl.values()] : null;
-}
-
 function mergeTools(list) {
   const byTool = new Map();
   for (const rd of list) {
@@ -144,7 +131,6 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt } = {}
   const dailyActivity = mergeDailyActivity(valid);
   const recentSessionCount = sumBy(valid, (rd) => rd.sessions?.recentWindow?.count);
   const recentTotalDurationMs = sumBy(valid, (rd) => rd.sessions?.recentWindow?.totalDurationMs);
-  const mergedPrsRaw = mergePrs(valid);
   const worktreeLabels = unionArrays(valid.map((rd) => rd.worktrees?.projectTraceLabels ?? []));
   const projectList = unionArrays(valid.map((rd) => rd.projects?.list ?? []));
 
@@ -156,7 +142,6 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt } = {}
     sources,
     dataAvailability: {
       hasStatsCache: valid.some((rd) => rd.dataAvailability?.hasStatsCache),
-      hasGhPrCache: valid.some((rd) => rd.dataAvailability?.hasGhPrCache),
     },
     period: {
       firstSessionDate: minString(valid.map((rd) => rd.period?.firstSessionDate).filter(Boolean)),
@@ -198,13 +183,6 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt } = {}
     git: {
       commits: sumBy(valid, (rd) => rd.git?.commits),
       pushes: sumBy(valid, (rd) => rd.git?.pushes),
-    },
-    github: {
-      prCreateCommands: sumBy(valid, (rd) => rd.github?.prCreateCommands),
-      prMergeCommands: sumBy(valid, (rd) => rd.github?.prMergeCommands),
-      prReviewCommands: sumBy(valid, (rd) => rd.github?.prReviewCommands),
-      prCommentCommands: sumBy(valid, (rd) => rd.github?.prCommentCommands),
-      prs: buildPrSummary(mergedPrsRaw),
     },
     code: {
       linesWritten: sumBy(valid, (rd) => rd.code?.linesWritten),

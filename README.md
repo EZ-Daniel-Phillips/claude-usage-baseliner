@@ -45,9 +45,7 @@ See `--help` for all options (`--since-last`, `--min-n`, `--bootstrap-samples`, 
 ## `--visualise`: what you did with Claude
 
 A third, independent mode: not "what did it cost", but "what did you actually do" - sessions, an
-"uptime" pattern (active days and hour-of-day spread, since Claude Code is a CLI with no process to
-ask "was it running 24/7"), total tokens, commits, worktrees created, lines written, and pull
-requests raised/reviewed.
+activity/hour-of-day pattern, total tokens, commits, worktrees created, and lines written.
 
 It is deliberately isolated from `--baseline`/`--compare`:
 
@@ -58,30 +56,34 @@ It is deliberately isolated from `--baseline`/`--compare`:
   usage/cost scanner and its dedupe/cursor state.
 
 Because Claude Code's transcripts rotate after roughly 30 days (see below), `--visualise` combines
-three sources to cover the tool's whole history, not just what is still on disk:
+two sources to cover the tool's whole history, not just what is still on disk:
 
 - **`stats-cache.json`** (Claude Code's own usage cache, at the root of the scanned directory) -
   survives transcript rotation, so it is the source for all-time sessions, messages, hour-of-day
   activity, daily activity, and token totals by model.
-- **`gh-pr-status-cache.json`** (Claude Code's gh PR status-poll cache) - pull requests it has
-  tracked, their state, review outcome, and GitHub's own additions/deletions count.
 - **A fresh transcript scan** - commits, pushes, worktree creations (both the `EnterWorktree` tool
-  and raw `git worktree add`), `gh pr` command usage, and an estimated line count from Write/Edit
-  tool calls. This part only sees the ~30-day retention window still on disk.
+  and raw `git worktree add`), and an estimated line count from Write/Edit tool calls. This part only
+  sees the ~30-day retention window still on disk.
 
-Both cache files are optional; a missing one degrades that section of the report rather than
+`stats-cache.json` is optional; a missing file degrades that section of the report rather than
 failing the run.
 
 **The lines-written/edited figures are an estimate, not a diff** - they count lines passed to the
 Write/Edit tools, so they cannot see reverts, repeated rewrites of the same lines, or code changed
-outside Claude Code. Where a PR exists, its GitHub-computed additions/deletions are the more
-trustworthy figure.
+outside Claude Code.
 
-**PR figures are a floor, not a total.** `gh-pr-status-cache.json` is the small rolling cache Claude
-Code's status line polls for PR checks/review state, not a running ledger - older entries fall out of
-it as new ones are checked. If a report's pull-request count looks far lower than you know it should
-be, that cache is why; the `gh pr create`/`gh pr review` command counts (from transcripts, so also
-window-limited) are a separate, usually larger, signal shown alongside it.
+**Pull-request metrics were tried and removed.** `gh-pr-status-cache.json` turned out to be a small
+rolling status-poll cache (whatever PRs the status line last checked), not a ledger, and the `gh pr
+create`/`gh pr review` command counts from transcripts were no more trustworthy (~30-day window,
+only PRs actually raised through the gh CLI). Both signals silently and significantly understated
+real PR history, so rather than keep an unreliable metric with caveats, it was removed outright.
+
+**`stats-cache.json` can be stale**, and this report does not currently correct for that. It is
+recomputed by Claude Code itself on its own schedule, not on every run - `lastComputedDate` (shown at
+the top of the report) can lag behind today by weeks. Token totals, session counts, daily activity
+and hour-of-day are all read verbatim from it, so any model used, or any day worked, after
+`lastComputedDate` is invisible to this report until Claude Code recomputes its cache. If a model you
+know you've used recently is missing from the token breakdown, check `lastComputedDate` first.
 
 ### `--merge`: combining data from more than one machine
 
@@ -111,14 +113,12 @@ Fields are combined by whichever rule is actually correct for what they measure,
 or averaged:
 
 - **Summed** - each source's activity is genuinely independent, so nothing here can double-count:
-  sessions, messages, tokens, commits, pushes, gh-CLI command counts, lines written/edited,
-  subagent/workflow counts, transcript files scanned.
+  sessions, messages, tokens, commits, pushes, lines written/edited, subagent/workflow counts,
+  transcript files scanned.
 - **Recomputed from combined raw data, not averaged** - daily activity is merged date-by-date before
   active-day coverage, streaks and gaps are recalculated; hour-of-day counts are summed per hour
   before percentages are recalculated.
-- **Deduplicated** - pull requests are merged by URL (a PR checked from more than one machine is
-  counted once; the most recently generated source wins on conflicting fields), and distinct
-  project/worktree names are unioned rather than summed.
+- **Deduplicated** - distinct project/worktree names are unioned rather than summed.
 
 The merged report is rendered with the same HTML as a single-machine `--visualise` report, with an
 added panel listing every source it was built from. Like `--visualise` itself, `--merge` only reads

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { readStatsCache, readGhPrCache } from '../scan/rootStats.js';
+import { readStatsCache } from '../scan/rootStats.js';
 import { scanActivity } from '../scan/activityScanner.js';
 import { buildActivityReportData } from '../report/activityMetrics.js';
 import { writeJsonReport } from '../report/json.js';
@@ -16,9 +16,8 @@ import { info } from '../util/log.js';
 export async function runVisualise({ claudeDir }) {
   info(`Reading usage cache under ${claudeDir} ...`);
   const statsCache = readStatsCache(claudeDir);
-  const ghPrs = readGhPrCache(claudeDir);
 
-  info(`Scanning transcripts under ${claudeDir} for activity (commits, worktrees, PRs, code written) ...`);
+  info(`Scanning transcripts under ${claudeDir} for activity (commits, worktrees, code written) ...`);
   const activityScan = await scanActivity(claudeDir);
 
   const id = `visualise-${compactIsoTimestamp()}`;
@@ -27,7 +26,6 @@ export async function runVisualise({ claudeDir }) {
     id,
     generatedAt: new Date().toISOString(),
     statsCache,
-    ghPrs,
     activityScan,
   });
 
