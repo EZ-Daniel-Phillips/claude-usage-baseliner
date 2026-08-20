@@ -24,7 +24,7 @@ function isBaselineCompareShaped(raw) {
 // --input; touches nothing else under ~/.claude on this machine, so it is exactly as isolated from
 // state.json as --visualise itself (a merged --baseline/--compare report is never state.json's
 // lastBaseline and can never be passed to --compare as a reference point - see getMergedReportsDir()).
-export async function runMerge({ inputs }) {
+export async function runMerge({ inputs, minN = 10, bootstrapSamples = 1500 }) {
   if (!inputs || inputs.length < 2) {
     throw new MergeInputError(`--merge needs at least 2 --input <path> files, got ${inputs?.length ?? 0}.`);
   }
@@ -51,7 +51,7 @@ export async function runMerge({ inputs }) {
     );
   }
 
-  return families.has('baseline-compare') ? mergeBaselineCompare(rawReports) : mergeVisualise(rawReports);
+  return families.has('baseline-compare') ? mergeBaselineCompare(rawReports, { minN, bootstrapSamples }) : mergeVisualise(rawReports);
 }
 
 async function mergeVisualise(reportDataList) {
@@ -83,14 +83,14 @@ async function mergeVisualise(reportDataList) {
   return { reportData, jsonPath, htmlPath };
 }
 
-async function mergeBaselineCompare(reportDataList) {
+async function mergeBaselineCompare(reportDataList, { minN, bootstrapSamples }) {
   info(`Merging ${reportDataList.length} --baseline/--compare report(s) ...`);
 
   const id = `report-merged-${compactIsoTimestamp()}`;
   const generatedAt = new Date().toISOString();
   let reportData;
   try {
-    reportData = mergeReportData(reportDataList, { id, generatedAt });
+    reportData = mergeReportData(reportDataList, { id, generatedAt, minN, bootstrapSamples });
   } catch (e) {
     throw new MergeInputError(e.message);
   }
@@ -103,7 +103,11 @@ async function mergeBaselineCompare(reportDataList) {
   writeJsonReport(jsonPath, reportData);
   fs.writeFileSync(htmlPath, renderHtmlReport(reportData), 'utf8');
 
-  info(`Merge complete: ${reportData.sources.length} source(s), ${reportData.totals.requests.toLocaleString('en-US')} requests combined.`);
+  info(
+    reportData.comparison
+      ? `Merge complete: combined verdict from ${reportData.sources.length} source(s), ${reportData.totals.requests.toLocaleString('en-US')} requests in the compared window.`
+      : `Merge complete: combined snapshot from ${reportData.sources.length} source(s), ${reportData.totals.requests.toLocaleString('en-US')} requests.`
+  );
   info(`  JSON: ${jsonPath}`);
   info(`  HTML: ${htmlPath}`);
 

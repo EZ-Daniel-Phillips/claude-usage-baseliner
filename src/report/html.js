@@ -688,18 +688,21 @@ function baselineStanding(reportData) {
 // Rendered right under the meta strip, mirroring visualiseHtml.js's own sourcesPanel - the one place
 // a reader can see what actually went into a merged report and judge for themselves whether combining
 // these particular windows was a like-for-like thing to do.
+const SOURCE_ROLE_LABEL = { 'baseline-side': 'fed the "before" side', 'compare-side': 'fed the "after" side', snapshot: 'combined snapshot' };
+
 function mergedSourcesPanel(reportData) {
   const sources = reportData.sources;
   if (!Array.isArray(sources) || !sources.length) return '';
   return `<div class="explainer">
     <h3>Sources merged into this report</h3>
     <table>
-      <thead><tr><th>Report</th><th>Mode</th><th>Claude directory</th><th>Generated</th><th class="num">Requests</th><th>Window covered</th></tr></thead>
+      <thead><tr><th>Report</th><th>Mode</th><th>Role in this merge</th><th>Claude directory</th><th>Generated</th><th class="num">Requests</th><th>Window covered</th></tr></thead>
       <tbody>${sources
         .map(
           (s) => `<tr>
         <td>${esc(s.id)}</td>
         <td>${esc(s.mode)}</td>
+        <td>${esc(SOURCE_ROLE_LABEL[s.role] ?? s.role)}</td>
         <td>${esc(s.claudeDir)}</td>
         <td>${fmtWhen(s.generatedAt)}</td>
         <td class="num">${fmtInt(s.requests)}</td>
@@ -718,6 +721,8 @@ function mergedSourcesPanel(reportData) {
 
 function methodExplainer(reportData) {
   const merged = Array.isArray(reportData.sources) && reportData.sources.length > 0;
+  const mergedVerdict = merged && reportData.comparison !== null;
+  const mergedSnapshot = merged && reportData.comparison === null;
   const m = reportData.cost.model;
   // 'flat' means at least one side lacked the cache-write TTL breakdown, so both were priced
   // with the conservative multiplier. Disclosed rather than silently applied.
@@ -725,11 +730,13 @@ function methodExplainer(reportData) {
   return `<div class="explainer">
     <h3>What period this covers</h3>
     ${
-      merged
-        ? `<p class="callout callout-info"><strong>This report combines several separate --baseline/--compare reports</strong>, assembled with <code>--merge</code> - it is not one continuous window. See the sources table above for exactly what period each one covers; mixing windows of very different lengths (or that do not overlap in time) is allowed, but makes the combined figures a sum of activity across those windows rather than a single like-for-like period.</p>`
-        : reportData.window?.mode === 'since-last-scan'
-          ? `<p class="callout callout-warn"><strong>This report covers only what was new since the previous scan.</strong> That window is now consumed &mdash; running <code>--compare --since-last</code> again will report only what arrives from here on, not this period again. For a stable, repeatable answer to &ldquo;how am I doing against my baseline?&rdquo;, run <code>--compare</code> without <code>--since-last</code>: it measures everything since the baseline every time, so the number only grows as you work.</p>`
-          : `<p>This report covers <strong>everything recorded since your baseline was taken</strong>. Re-running <code>--compare</code> measures the same period again plus whatever is new, so the answer is stable and the request count only grows. Nothing is consumed by reading it.</p>`
+      mergedVerdict
+        ? `<p class="callout callout-info"><strong>This report merges every --baseline source into one combined &ldquo;before&rdquo; and every --compare source into one combined &ldquo;after&rdquo;</strong>, then compares those two combined windows exactly the way a single-machine --compare compares its baseline against itself. See the sources table above for which report fed which side and what period each one covers.</p>`
+        : mergedSnapshot
+          ? `<p class="callout callout-info"><strong>This report combines several separate --baseline/--compare reports</strong>, assembled with <code>--merge</code> - it is not one continuous window. See the sources table above for exactly what period each one covers; mixing windows of very different lengths (or that do not overlap in time) is allowed, but makes the combined figures a sum of activity across those windows rather than a single like-for-like period.</p>`
+          : reportData.window?.mode === 'since-last-scan'
+            ? `<p class="callout callout-warn"><strong>This report covers only what was new since the previous scan.</strong> That window is now consumed &mdash; running <code>--compare --since-last</code> again will report only what arrives from here on, not this period again. For a stable, repeatable answer to &ldquo;how am I doing against my baseline?&rdquo;, run <code>--compare</code> without <code>--since-last</code>: it measures everything since the baseline every time, so the number only grows as you work.</p>`
+            : `<p>This report covers <strong>everything recorded since your baseline was taken</strong>. Re-running <code>--compare</code> measures the same period again plus whatever is new, so the answer is stable and the request count only grows. Nothing is consumed by reading it.</p>`
     }
     ${
       merged
@@ -738,8 +745,12 @@ function methodExplainer(reportData) {
     <ul>
       <li><strong>Summed exactly</strong> (each source's activity is genuinely independent, so nothing here can double-count): requests, all token counts and cost, per-model/per-agent-type/per-tier totals, tool-payload bytes, compaction counts, transcript files scanned.</li>
       <li><strong>Recomputed from the merged totals</strong>, not averaged: estimated cost and the per-request profile are re-derived from the summed byModel breakdown, so they price exactly rather than blending two already-derived rates.</li>
-      <li><strong>Estimated from a combined sample</strong>: the median, percentiles and confidence intervals for request/session/hour size. Each source's report only ever stored a bounded random sample (not every raw value), so these are recomputed from a sample drawn from each source in proportion to its true size - see &ldquo;which numbers are exact&rdquo; below for what stays exact regardless.</li>
-      <li><strong>Not attempted</strong>: a combined before/after verdict. A --compare report does not persist its baseline's raw per-agent-type, tool-payload or compaction data - only the findings already derived from it - so there is not enough on disk to rebuild a rigorous merged comparison. This report is always a standing snapshot (like a --baseline), never a compare verdict, whatever mix of --baseline/--compare reports went in.</li>
+      <li><strong>Estimated from a combined sample</strong>: the median, percentiles and confidence intervals for request/session/hour size, and (in a combined verdict) the significance test. Each source's report only ever stored a bounded random sample (not every raw value), so these are recomputed from a sample drawn from each source in proportion to its true size - see &ldquo;which numbers are exact&rdquo; below for what stays exact regardless.</li>
+      ${
+        mergedVerdict
+          ? `<li><strong>A genuine combined verdict</strong>, not an approximation: because every --baseline source keeps its own full raw per-agent-type/tool-payload/compaction/distribution data (unlike a --compare report's own embedded baseline reference, which keeps only already-derived findings), merging --baseline sources together and --compare sources together gives two real, complete windows to compare - so this report runs the exact same decomposition, quality-guardrail and significance-testing logic a single-machine --compare does, just fed from the merged windows either side.</li>`
+          : `<li><strong>Not attempted</strong>: a combined before/after verdict. This merge's sources are all one mode (all --baseline, or all --compare), so there is only one window's worth of raw data here, not a &ldquo;before&rdquo; and an &ldquo;after&rdquo; to compare. This report is therefore a standing snapshot, never a verdict. Include at least one --baseline report alongside at least one --compare report in the same --merge run to get a real combined verdict instead.</li>`
+      }
     </ul>`
         : ''
     }
@@ -1081,7 +1092,9 @@ export function renderHtmlReport(reportData) {
 
   const title = isCompare ? 'Did the changes work?' : merged ? 'Combined usage across machines' : 'Your usage baseline';
   const subtitle = isCompare
-    ? 'Everything below compares activity since your baseline against the baseline itself, normalized so the two periods are directly comparable.'
+    ? merged
+      ? 'Combines every --baseline source into one "before" and every --compare source into one "after", then compares them the same way a single-machine --compare does - see the sources table and methodology below for exactly how. Independent of any single machine\'s <code>state.json</code>.'
+      : 'Everything below compares activity since your baseline against the baseline itself, normalized so the two periods are directly comparable.'
     : merged
       ? 'Assembled with <code>--merge</code> from several separate --baseline/--compare reports into one combined view - see the sources table and methodology below for exactly how figures were combined. Independent of any single machine\'s <code>state.json</code>.'
       : 'A reference point for everything you measure from here. Make your changes, then run <code>--compare</code>.';

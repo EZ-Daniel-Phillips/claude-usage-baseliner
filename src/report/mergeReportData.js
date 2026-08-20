@@ -1,30 +1,38 @@
 // Combines two or more --baseline/--compare report-data JSON objects (e.g. one dumped from each of
-// several machines) into a single report-data object shaped exactly like a --baseline report, so it
-// renders with the ordinary renderHtmlReport() unchanged. The most common use: two machines each ran
-// --baseline (or --compare) at their own pace, and you want one combined view of your fleet's total
-// usage rather than switching between two files.
+// several machines) into a single report-data object.
 //
-// A merged report always has `mode: 'baseline'` and `comparison: null`, whatever mix of --baseline
-// and --compare sources went in. Mixing the two is allowed - a --baseline's window is "everything
-// ever scanned on that machine" and a --compare's is "everything since that machine's own baseline",
-// and both are stored in an identical shape (totals/byModel/byAgentType/byTier/distributions/
-// toolPayload/compaction all describe "this report's own window"), so summing them is mechanical.
-// What is NOT attempted is a combined before/after verdict: a --compare report does not persist its
-// baseline's raw per-agent-type/tool-payload/compaction data (only the already-computed findings
-// derived from it), so there isn't enough on disk to rebuild a rigorous merged comparison - only an
-// approximate one, and this tool does not fake precision it cannot back up. Each source's own window
-// is disclosed in the `sources` table instead, so the reader can judge comparability themselves.
+// Two distinct outcomes, chosen automatically from what mode the inputs carry:
+//
+// - All --baseline, or all --compare, or a mix where one mode group is empty: there is only ONE
+//   window's worth of raw data available, so the result is a standing SNAPSHOT (`mode: 'baseline'`,
+//   `comparison: null`) - a combined "where do we stand" view, not a verdict. A --baseline's window
+//   is "everything ever scanned on that machine" and a --compare's is "everything since that
+//   machine's own baseline"; both are stored in an identical shape (totals/byModel/byAgentType/
+//   byTier/distributions/toolPayload/compaction all describe "this report's own window"), so summing
+//   them is mechanical either way.
+//
+// - AT LEAST ONE --baseline AND AT LEAST ONE --compare are both present: there is now a genuine
+//   before/after to measure, using the exact same machinery a single-machine --compare uses
+//   (perRequestProfile/decomposeCostChange/buildInsights/compareDistributions) - fed from the
+//   --baseline inputs merged together as the "before" side and the --compare inputs merged together
+//   as the "after" side. This works because, unlike a --compare report's OWN embedded baseline
+//   reference (which only keeps already-derived findings, not raw data), an actual --baseline report
+//   JSON keeps everything raw: per-agent-type, per-tool, compaction, full distributions. Passing both
+//   files in is what makes a rigorous merged VERDICT (`mode: 'compare'`) possible, where merging
+//   --compare reports alone could only ever produce a snapshot.
 //
 // Statistical honesty note: every report-data JSON stores EXACT totals (n, sum, min, max) for its
 // distributions, but only a bounded random sample (up to 5,000 values) for anything that needs the
-// raw values (percentiles, bootstrap CIs). So a merged report's n/mean/min/max are exact, but its
-// median/percentiles/bootstrap CIs are recomputed from a combined sample - see mergeDistribution()
-// below for how sources of very different sizes are weighted so a small source cannot dominate a
-// much larger one just because both contribute an equally-sized stored sample.
+// raw values (percentiles, bootstrap CIs, the Mann-Whitney significance test). So a merged window's
+// n/mean/min/max are exact, but its median/percentiles/bootstrap CIs/significance test are computed
+// from a combined sample - see mergeDistributionSummary() below for how sources of very different
+// sizes are weighted so a small source cannot dominate a much larger one just because both contribute
+// an equally-sized stored sample.
 
-import { estimateCostByModel, COST_MODEL_NOTES } from './cost.js';
-import { perRequestProfile } from './insights.js';
+import { estimateCostByModel, COST_MODEL_NOTES, byModelHasTtlSplit } from './cost.js';
+import { perRequestProfile, decomposeCostChange, buildInsights } from './insights.js';
 import { tokenShare } from './metrics.js';
+import { compareDistributions } from '../stats/compare.js';
 import { reservoirSample } from '../stats/distribution.js';
 import { percentile, stdev } from '../stats/percentiles.js';
 import { bootstrapMedianCI, bootstrapP85CI } from '../stats/bootstrap.js';
@@ -262,18 +270,13 @@ function describeWindow(rd) {
   return 'unknown window';
 }
 
-export function mergeReportData(reportDataList, { id, generatedAt, bootstrapSamples = 1500 } = {}) {
-  if (!Array.isArray(reportDataList) || reportDataList.length < 2) {
-    throw new MergeReportDataError(`mergeReportData needs at least 2 report-data objects, got ${reportDataList?.length ?? 0}.`);
-  }
-  for (const rd of reportDataList) {
-    if (rd.mode !== 'baseline' && rd.mode !== 'compare') {
-      throw new MergeReportDataError(
-        `Every --input must be a --baseline or --compare report JSON. Got a report with mode "${rd.mode}" - --visualise JSON reports must be merged separately, without mixing in --baseline/--compare files.`
-      );
-    }
-  }
-
+// Merges N report-data objects' raw window contents (everything EXCEPT mode/id/generatedAt/
+// claudeDir/comparison) into one object of the same field shape. Used both to build a standalone
+// snapshot (fed straight into the returned report-data) and, when both --baseline and --compare
+// inputs are present, to build the "before" and "after" sides of a real comparison independently -
+// each side is merged with exactly this same logic, so a group of one report just passes through
+// unchanged.
+function mergeReportWindows(reportDataList, { bootstrapSamples = 1500 } = {}) {
   const scan = {
     filesScanned: sumField(reportDataList, (r) => r.scan.filesScanned),
     newFiles: sumField(reportDataList, (r) => r.scan.newFiles),
@@ -320,37 +323,113 @@ export function mergeReportData(reportDataList, { id, generatedAt, bootstrapSamp
     totalScriptBytes: sumField(reportDataList, (r) => r.workflowDefinitions?.totalScriptBytes),
   };
 
+  return { scan, totals, byTier, byAgentType, byModel, distributions, compaction, toolPayload, attachments, workflowDefinitions };
+}
+
+function sourceEntry(r, role) {
   return {
-    // Always a standing snapshot, never a compare verdict - see this file's header for why a
-    // rigorous merged before/after isn't attempted.
+    id: r.id,
+    mode: r.mode,
+    role,
+    claudeDir: r.claudeDir,
+    generatedAt: r.generatedAt,
+    requests: r.totals.requests,
+    filesScanned: r.scan.filesScanned,
+    windowDescription: describeWindow(r),
+    baselineRef: r.baselineRef ?? null,
+  };
+}
+
+export function mergeReportData(reportDataList, { id, generatedAt, bootstrapSamples = 1500, minN = 10 } = {}) {
+  if (!Array.isArray(reportDataList) || reportDataList.length < 2) {
+    throw new MergeReportDataError(`mergeReportData needs at least 2 report-data objects, got ${reportDataList?.length ?? 0}.`);
+  }
+  for (const rd of reportDataList) {
+    if (rd.mode !== 'baseline' && rd.mode !== 'compare') {
+      throw new MergeReportDataError(
+        `Every --input must be a --baseline or --compare report JSON. Got a report with mode "${rd.mode}" - --visualise JSON reports must be merged separately, without mixing in --baseline/--compare files.`
+      );
+    }
+  }
+
+  const baselines = reportDataList.filter((r) => r.mode === 'baseline');
+  const compares = reportDataList.filter((r) => r.mode === 'compare');
+
+  // Both sides present: a genuine before/after can be rebuilt, because --baseline report JSON keeps
+  // full raw data (unlike a --compare report's own embedded baseline reference, which only keeps
+  // already-derived findings). See this file's header for why that distinction matters.
+  if (baselines.length > 0 && compares.length > 0) {
+    const base = mergeReportWindows(baselines, { bootstrapSamples });
+    const comp = mergeReportWindows(compares, { bootstrapSamples });
+
+    const ttlMode = byModelHasTtlSplit(comp.byModel) && byModelHasTtlSplit(base.byModel) ? 'exact' : 'flat';
+    const baselineProfile = perRequestProfile(base.totals.tokens, base.totals.requests, base.byModel, { ttlMode });
+    const compareProfile = perRequestProfile(comp.totals.tokens, comp.totals.requests, comp.byModel, { ttlMode });
+    const decomposition = decomposeCostChange(baselineProfile, compareProfile);
+
+    const comparisonDistributions = {
+      tokensPerRequest: compareDistributions(base.distributions.tokensPerRequest, comp.distributions.tokensPerRequest, { minN }),
+      tokensPerSession: compareDistributions(base.distributions.tokensPerSession, comp.distributions.tokensPerSession, { minN }),
+      tokensPerActiveHour: compareDistributions(base.distributions.tokensPerActiveHour, comp.distributions.tokensPerActiveHour, { minN }),
+    };
+
+    const comparison = {
+      distributions: comparisonDistributions,
+      headlineVerdict: comparisonDistributions.tokensPerRequest.verdict,
+      baselineProfile,
+      compareProfile,
+      decomposition,
+      insights: buildInsights({
+        base: baselineProfile,
+        comp: compareProfile,
+        comparison: { distributions: comparisonDistributions },
+        decomposition,
+        baseCompaction: base.compaction,
+        compCompaction: comp.compaction,
+        baseToolPayload: base.toolPayload,
+        compToolPayload: comp.toolPayload,
+        baseByAgentType: base.byAgentType,
+        compByAgentType: comp.byAgentType,
+      }),
+      ttlMode,
+    };
+
+    return {
+      mode: 'compare',
+      id,
+      generatedAt,
+      claudeDir: null,
+      baselineRef: baselines.map((r) => r.id).join(' + '),
+      window: null,
+      scan: comp.scan,
+      totals: comp.totals,
+      cost: { ...estimateCostByModel(comp.byModel), model: COST_MODEL_NOTES },
+      profile: compareProfile,
+      byTier: comp.byTier,
+      byAgentType: comp.byAgentType,
+      byModel: comp.byModel,
+      distributions: comp.distributions,
+      compaction: comp.compaction,
+      attachments: comp.attachments,
+      toolPayload: comp.toolPayload,
+      workflowDefinitions: comp.workflowDefinitions,
+      comparison,
+      sources: [...baselines.map((r) => sourceEntry(r, 'baseline-side')), ...compares.map((r) => sourceEntry(r, 'compare-side'))],
+    };
+  }
+
+  // Only one mode present (all --baseline, or all --compare): there is only one window's worth of
+  // raw data, so the result is a standing snapshot, never a verdict.
+  const merged = mergeReportWindows(reportDataList, { bootstrapSamples });
+  return {
     mode: 'baseline',
     id,
     generatedAt,
     claudeDir: null,
     baselineRef: null,
     window: null,
-    scan,
-    totals,
-    cost: { ...estimateCostByModel(byModel), model: COST_MODEL_NOTES },
-    profile: perRequestProfile(totals.tokens, totals.requests, byModel),
-    byTier,
-    byAgentType,
-    byModel,
-    distributions,
-    compaction,
-    attachments,
-    toolPayload,
-    workflowDefinitions,
+    ...merged,
     comparison: null,
-    sources: reportDataList.map((r) => ({
-      id: r.id,
-      mode: r.mode,
-      claudeDir: r.claudeDir,
-      generatedAt: r.generatedAt,
-      requests: r.totals.requests,
-      filesScanned: r.scan.filesScanned,
-      windowDescription: describeWindow(r),
-      baselineRef: r.baselineRef ?? null,
-    })),
+    sources: reportDataList.map((r) => sourceEntry(r, 'snapshot')),
   };
 }
