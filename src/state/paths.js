@@ -25,6 +25,14 @@ export function getVisualiseDir() {
   return path.join(getOutputRoot(), 'visualise');
 }
 
+// Also separate from baselines/ and compares/: a merged --baseline/--compare report is a read-only,
+// standalone snapshot assembled from other reports' JSON. It is never state.json's lastBaseline, and
+// can never be passed to --compare as a reference point, so it must never be mistaken for one of the
+// real per-machine files those directories hold.
+export function getMergedReportsDir() {
+  return path.join(getOutputRoot(), 'merged');
+}
+
 export function defaultClaudeDir() {
   return path.join(os.homedir(), '.claude');
 }

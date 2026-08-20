@@ -37,6 +37,8 @@ clones/reinstalls of this tool.
   baselines/baseline-<timestamp>.json + .html
   compares/compare-<timestamp>.json + .html
   visualise/visualise-<timestamp>.json + .html
+  merged/report-merged-<timestamp>.json + .html      (--merge, --baseline/--compare inputs)
+  visualise/visualise-merged-<timestamp>.json + .html (--merge, --visualise inputs)
 ```
 
 See `--help` for all options (`--since-last`, `--min-n`, `--bootstrap-samples`, `--quiet`,
@@ -129,7 +131,7 @@ the gap between `lastComputedDate` and the oldest transcript still on disk is la
 that span is permanently unrecoverable and the report says so - session/message *counts* (which still
 come only from the cache) are the one figure this does not fix.
 
-### `--merge`: combining data from more than one machine
+### `--merge`: combining --visualise data from more than one machine
 
 Each machine you use Claude Code on has its own `~/.claude`, so a single `--visualise` run only ever
 sees that machine's history. `--merge` combines two or more `--visualise` JSON reports - typically one
@@ -172,6 +174,82 @@ or averaged:
 The merged report is rendered with the same HTML as a single-machine `--visualise` report, with an
 added panel listing every source it was built from. Like `--visualise` itself, `--merge` only reads
 the files named by `--input` and writes its own JSON+HTML pair - it never touches `state.json`.
+
+### `--merge`: combining --baseline/--compare data from more than one machine
+
+The same `--merge` flag also accepts `--baseline`/`--compare` report JSON instead of `--visualise`
+JSON - useful when several machines each keep their own baseline (and their own compare, measured
+since their own baseline) and you want one combined view of your total usage. **What you get back
+depends on which modes you pass in:**
+
+- **Only `--baseline` reports, or only `--compare` reports** &rarr; a combined **snapshot** ("where do
+  we stand, combined"). There is only one window's worth of raw data among the inputs, so there is
+  nothing to compare it against - the merged report renders like a `--baseline` report, never a
+  verdict.
+- **At least one `--baseline` report AND at least one `--compare` report** &rarr; a combined
+  **verdict** ("did the changes work, combined") - a real before/after comparison, computed the same
+  way a single-machine `--compare` computes its own. Every `--baseline` source in the input set is
+  merged into the "before" side; every `--compare` source is merged into the "after" side; then the
+  same decomposition, quality-guardrail and significance-testing logic that a single-machine
+  `--compare` runs is run once, on those two merged sides.
+
+This works because a `--baseline` report JSON keeps its **full raw data** (per-agent-type, per-tool,
+compaction, complete distributions) - unlike a `--compare` report's own embedded reference to its
+baseline, which keeps only the findings already derived from it, not the raw numbers behind them.
+Passing the actual `--baseline` files in alongside the `--compare` files is what makes a rigorous
+combined verdict possible; merging `--compare` reports alone can never produce one, no matter how many
+you pass in.
+
+To get a combined verdict across two machines, copy **all four files** - each machine's `--baseline`
+JSON and each machine's `--compare` JSON - to one place and merge them together in a single run:
+
+```
+# On machine A:
+node bin/claude-usage-baseliner.js --baseline
+# -> ~/.claude/claude-usage-baseliner/baselines/baseline-<timestamp>.json
+# ... use Claude Code for a while, then:
+node bin/claude-usage-baseliner.js --compare
+# -> ~/.claude/claude-usage-baseliner/compares/compare-<timestamp>.json
+
+# On machine B: the same two commands, at its own pace
+# -> baseline-<timestamp>.json and compare-<timestamp>.json
+
+# Copy all four JSON files to one machine, then:
+node bin/claude-usage-baseliner.js --merge \
+  --input machineA-baseline-<timestamp>.json \
+  --input machineB-baseline-<timestamp>.json \
+  --input machineA-compare-<timestamp>.json \
+  --input machineB-compare-<timestamp>.json
+# -> ~/.claude/claude-usage-baseliner/merged/report-merged-<timestamp>.json + .html
+#    (a combined verdict, since both modes are present)
+```
+
+Passing just the two `--baseline` files (or just the two `--compare` files) from that same example
+produces a combined snapshot instead - still useful on its own ("what does our combined starting
+point/combined current activity look like"), just not a verdict.
+
+A merged `--baseline`/`--compare` report - snapshot or verdict - can never be passed to `--compare` as
+a reference point, since it never touches any machine's `state.json`.
+
+Fields are combined the same way as a `--visualise` merge - correctly, not uniformly:
+
+- **Summed exactly** - requests, every token count and cost, per-model/per-agent-type/per-tier
+  totals, tool-payload bytes, compaction counts, transcript files scanned. In a combined verdict, this
+  happens independently on each side (all `--baseline` sources summed together, all `--compare`
+  sources summed together) before the two sides are compared.
+- **Recomputed from the merged totals** - estimated cost and the per-request profile are re-derived
+  from the summed per-model breakdown, so they price exactly rather than blending two already-derived
+  rates.
+- **Estimated from a combined sample** - the median, percentiles, confidence intervals, and (in a
+  combined verdict) the significance test. Each source only ever stored a bounded random sample (up to
+  5,000 values), not every raw value, so these are recomputed from a sample drawn from each source in
+  proportion to its true size (a small source can't outweigh a much larger one just because both
+  stored an equally-sized sample) - representative, but no longer exact the way a single-machine
+  report's percentiles are.
+
+The merged report discloses all of this itself, with a sources table (each source's id, mode, which
+side of the merge it fed, `claudeDir`, and the window it covers) and a "How the merged sources were
+combined" section.
 
 ## Reading the report
 
