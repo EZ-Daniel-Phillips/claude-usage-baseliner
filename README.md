@@ -55,15 +55,15 @@ It is deliberately isolated from `--baseline`/`--compare`:
 - It runs its own transcript walk (`src/scan/activityScanner.js`), independent of the
   usage/cost scanner and its dedupe/cursor state.
 
-Because Claude Code's transcripts rotate after roughly 30 days (see below), `--visualise` combines
-two sources to cover the tool's whole history, not just what is still on disk:
+Because Claude Code's transcripts rotate after roughly 30 days, `--visualise` combines two sources
+to cover the tool's whole history, not just what is still on disk:
 
 - **`stats-cache.json`** (Claude Code's own usage cache, at the root of the scanned directory) -
-  survives transcript rotation, so it is the source for all-time sessions, messages, hour-of-day
-  activity, daily activity, and token totals by model.
+  survives transcript rotation, so it is the source for all-time session/message counts.
 - **A fresh transcript scan** - commits, pushes, worktree creations (both the `EnterWorktree` tool
-  and raw `git worktree add`), and an estimated line count from Write/Edit tool calls. This part only
-  sees the ~30-day retention window still on disk.
+  and raw `git worktree add`), an estimated line count from Write/Edit tool calls, and (see below)
+  hour-of-day activity, daily activity, and any token/model usage newer than the cache. This part
+  only sees the ~30-day retention window still on disk.
 
 `stats-cache.json` is optional; a missing file degrades that section of the report rather than
 failing the run.
@@ -78,12 +78,29 @@ create`/`gh pr review` command counts from transcripts were no more trustworthy 
 only PRs actually raised through the gh CLI). Both signals silently and significantly understated
 real PR history, so rather than keep an unreliable metric with caveats, it was removed outright.
 
-**`stats-cache.json` can be stale**, and this report does not currently correct for that. It is
+**Hour-of-day and daily activity no longer come from `stats-cache.json`.** An earlier version read
+its `hourCounts` field, which turned out to be a per-*session-start* histogram, not an activity
+histogram (`sum(hourCounts) === totalSessions`, exactly) - a session left running unattended for
+hours or days registered identically to a 30-second one, so genuinely long-running or overnight
+sessions never showed up as overnight activity. Hour-of-day and the recent daily-activity chart are
+now computed directly from transcript timestamps still on disk, counting two distinct kinds of
+event: **"Claude working"** (any assistant turn, or any tool round-trip, across every tier - main
+sessions, subagents, and workflow agents) and **"your prompts"** (genuine human-typed messages, main
+sessions only). This is why the two are shown as separate series rather than one number: a
+subagent's opening message is its parent's injected task text, not something you typed, and an
+unattended multi-hour or multi-day run should show up as hours of Claude-working activity, not one
+entry at whatever hour it was started.
+
+**`stats-cache.json` can be stale, and token/model totals are supplemented for it.** The cache is
 recomputed by Claude Code itself on its own schedule, not on every run - `lastComputedDate` (shown at
-the top of the report) can lag behind today by weeks. Token totals, session counts, daily activity
-and hour-of-day are all read verbatim from it, so any model used, or any day worked, after
-`lastComputedDate` is invisible to this report until Claude Code recomputes its cache. If a model you
-know you've used recently is missing from the token breakdown, check `lastComputedDate` first.
+the top of the report) can lag behind today by weeks, which previously hid any model adopted after
+that date (e.g. a newly-released model) from the token/cost breakdown entirely. The report now
+supplements the cached per-model token totals with anything computed live from transcripts dated
+after `lastComputedDate` (deduplicated by message id, so nothing already in the cache is
+double-counted), and discloses how stale the cache is and how many tokens were recovered this way. If
+the gap between `lastComputedDate` and the oldest transcript still on disk is larger than one day,
+that span is permanently unrecoverable and the report says so - session/message *counts* (which still
+come only from the cache) are the one figure this does not fix.
 
 ### `--merge`: combining data from more than one machine
 
@@ -115,10 +132,15 @@ or averaged:
 - **Summed** - each source's activity is genuinely independent, so nothing here can double-count:
   sessions, messages, tokens, commits, pushes, lines written/edited, subagent/workflow counts,
   transcript files scanned.
-- **Recomputed from combined raw data, not averaged** - daily activity is merged date-by-date before
-  active-day coverage, streaks and gaps are recalculated; hour-of-day counts are summed per hour
-  before percentages are recalculated.
+- **Recomputed from combined raw data, not averaged** - the cached and recent daily-activity series
+  are each merged date-by-date (kept separate from each other, since they measure different things -
+  see above), then active-day coverage, streaks and gaps are recalculated from the union of active
+  dates across both; the "Claude working" and "your prompts" hour-of-day series are each summed per
+  hour across sources before percentages/shares are recalculated.
 - **Deduplicated** - distinct project/worktree names are unioned rather than summed.
+- **Not carried over** - per-source cache-staleness detail (each machine has its own
+  `stats-cache.json` on its own recompute schedule) doesn't collapse into one meaningful figure, so a
+  merged report doesn't show a staleness banner; check each source's own report for that.
 
 The merged report is rendered with the same HTML as a single-machine `--visualise` report, with an
 added panel listing every source it was built from. Like `--visualise` itself, `--merge` only reads

@@ -312,9 +312,15 @@ export function timeSeriesBars(rows, { width = 860, height = 220, valueLabel = '
 }
 
 // ---------------------------------------------------------------------------
-// Hour-of-day bars (24 bars, when work actually happens across the day)
+// Hour-of-day bars (24 hours, two series: Claude working vs. your prompts)
 // ---------------------------------------------------------------------------
-export function hourOfDayChart(hours, { width = 860, height = 200, businessStart = 9, businessEnd = 17 } = {}) {
+// "Claude working" (assistant turns + tool round-trips, every tier) and "your prompts" (genuine
+// human-authored lines, main tier only) are shown as paired bars, each scaled as a share of that
+// series' own total - the two series can differ by an order of magnitude in raw count (many tool
+// round-trips per human prompt), so plotting raw counts on one shared scale would make the smaller
+// series invisible. Business hours are shown as a shaded background band rather than bar colour,
+// since bar colour now identifies the series instead.
+export function hourOfDayChart(hours, { width = 860, height = 220, businessStart = 9, businessEnd = 17 } = {}) {
   if (!hours.length) return '<p class="muted">No data.</p>';
   const padL = 46;
   const padR = 10;
@@ -322,31 +328,42 @@ export function hourOfDayChart(hours, { width = 860, height = 200, businessStart
   const padB = 26;
   const plotW = width - padL - padR;
   const plotH = height - padT - padB;
-  const max = Math.max(...hours.map((h) => h.count)) || 1;
-  const barW = plotW / hours.length - 3;
+  const max = Math.max(...hours.map((h) => Math.max(h.pctClaudeWorking ?? 0, h.pctHumanPrompts ?? 0))) || 1;
+  const slotW = plotW / hours.length;
+  const barW = Math.max(0.6, slotW / 2 - 1.5);
   const sy = (v) => padT + plotH - (v / max) * plotH;
   const pad2 = (n) => String(n).padStart(2, '0');
 
+  const businessBand =
+    businessEnd > businessStart
+      ? `<rect x="${(padL + businessStart * slotW).toFixed(1)}" y="${padT}" width="${((businessEnd - businessStart) * slotW).toFixed(1)}" height="${plotH.toFixed(1)}" fill="var(--neutral-bg)"/>`
+      : '';
+
   const bars = hours
     .map((h, i) => {
-      const x = padL + i * (plotW / hours.length);
-      const barH = Math.max(0.5, (h.count / max) * plotH);
-      const business = h.hour >= businessStart && h.hour < businessEnd;
+      const xSlot = padL + i * slotW;
+      const cw = h.pctClaudeWorking ?? 0;
+      const hp = h.pctHumanPrompts ?? 0;
+      const cwH = Math.max(0.5, (cw / max) * plotH);
+      const hpH = Math.max(0.5, (hp / max) * plotH);
       return `<g>
-        <rect class="${business ? 'bar-a' : 'bar-b'}" x="${x.toFixed(2)}" y="${sy(h.count).toFixed(1)}" width="${barW.toFixed(2)}" height="${barH.toFixed(1)}" rx="2"><title>${pad2(h.hour)}:00 &ndash; ${fmtCompact(h.count)} tool/message events (${h.pct.toFixed(1)}%)</title></rect>
-        <text class="tick" x="${(x + barW / 2).toFixed(1)}" y="${padT + plotH + 14}" text-anchor="middle">${h.hour % 3 === 0 ? h.hour : ''}</text>
+        <rect class="bar-a" x="${xSlot.toFixed(2)}" y="${sy(cw).toFixed(1)}" width="${barW.toFixed(2)}" height="${cwH.toFixed(1)}" rx="1.5"><title>${pad2(h.hour)}:00 &ndash; Claude working: ${fmtCompact(h.claudeWorking)} events (${cw.toFixed(1)}% of all Claude-working events)</title></rect>
+        <rect class="bar-b" x="${(xSlot + barW + 1.5).toFixed(2)}" y="${sy(hp).toFixed(1)}" width="${barW.toFixed(2)}" height="${hpH.toFixed(1)}" rx="1.5"><title>${pad2(h.hour)}:00 &ndash; your prompts: ${fmtCompact(h.humanPrompts)} (${hp.toFixed(1)}% of all your prompts)</title></rect>
+        <text class="tick" x="${(xSlot + slotW / 2).toFixed(1)}" y="${padT + plotH + 14}" text-anchor="middle">${h.hour % 3 === 0 ? h.hour : ''}</text>
       </g>`;
     })
     .join('');
 
   return `<figure class="chart">
-    <svg viewBox="0 0 ${width} ${height}" role="img" width="100%" preserveAspectRatio="xMidYMid meet" aria-label="Activity by hour of day">
+    <svg viewBox="0 0 ${width} ${height}" role="img" width="100%" preserveAspectRatio="xMidYMid meet" aria-label="Activity by hour of day, local time: Claude working versus your prompts">
+      ${businessBand}
       ${bars}
       <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}"/>
     </svg>
     <div class="legend">
-      <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Business hours (${pad2(businessStart)}:00&ndash;${pad2(businessEnd)}:00)</span>
-      <span class="legend-item"><span class="swatch" style="background:var(--series-2)"></span>Outside business hours</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Claude working (assistant turns + tool round-trips)</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--series-2)"></span>Your prompts (human-typed messages)</span>
+      <span class="legend-item muted">Shaded band: business hours (${pad2(businessStart)}:00&ndash;${pad2(businessEnd)}:00)</span>
     </div>
   </figure>`;
 }

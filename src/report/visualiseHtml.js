@@ -89,39 +89,67 @@ function headlineKpis(rd) {
 function steadinessSection(rd) {
   const cov = rd.coverage;
   const hod = rd.hourOfDay;
-  if (!cov || !hod) {
-    return '<p class="callout callout-warn"><strong>No usage-cache data available.</strong> This machine has no <code>stats-cache.json</code> under the scanned directory, so activity history and hour-of-day patterns cannot be shown. Everything else on this page still comes from transcripts.</p>';
+  if (!cov && !hod) {
+    return '<p class="callout callout-warn"><strong>No activity data available.</strong> Neither the usage cache nor any transcripts still on disk have any recorded activity, so activity history and hour-of-day patterns cannot be shown.</p>';
   }
 
-  const dailyRows = rd.dailyActivity.map((d) => ({
-    label: d.date,
-    value: d.messageCount,
-    valueText: `${fmtInt(d.messageCount)} messages, ${fmtInt(d.sessionCount)} session(s)`,
-  }));
+  const cachedRows = (rd.dailyActivity ?? [])
+    .filter((d) => (d.messageCount ?? 0) > 0 || (d.sessionCount ?? 0) > 0)
+    .map((d) => ({ label: d.date, value: d.messageCount, valueText: `${fmtInt(d.messageCount)} messages, ${fmtInt(d.sessionCount)} session(s)` }));
+
+  const recentRows = (rd.recentDailyActivity ?? [])
+    .filter((d) => (d.claudeEvents ?? 0) > 0 || (d.humanPrompts ?? 0) > 0)
+    .map((d) => ({
+      label: d.date,
+      value: d.claudeEvents,
+      valueText: `${fmtInt(d.claudeEvents)} Claude-working events, ${fmtInt(d.humanPrompts)} prompt(s), ${fmtInt(d.sessionsStarted)} session(s) started`,
+    }));
 
   // Plain em dashes here, not &mdash; - this string is passed through kpiCard(), which escapes its
   // meaning text (correctly, since most callers pass plain text), so an HTML entity here would come
   // out double-encoded as the literal text "&mdash;" instead of a dash.
-  const spreadVerdict =
-    hod.hourSpreadPct >= 90
-      ? `Activity has been logged in ${hod.hoursWithActivity} of the 24 hours of the day at some point — usage is spread around the clock rather than confined to a shift.`
+  const spreadVerdict = !hod
+    ? ''
+    : hod.hourSpreadPct >= 90
+      ? `Claude has been working in ${hod.hoursWithActivity} of the 24 hours of the day at some point — usage is spread around the clock rather than confined to a shift.`
       : hod.hourSpreadPct >= 60
-        ? `Activity has been logged in ${hod.hoursWithActivity} of 24 hours — a wide spread, but with a clear quiet stretch.`
-        : `Activity is concentrated in just ${hod.hoursWithActivity} of the 24 hours — this looks like a working-hours pattern, not round-the-clock use.`;
+        ? `Claude has been working in ${hod.hoursWithActivity} of 24 hours — a wide spread, but with a clear quiet stretch.`
+        : `Claude's working hours are concentrated in just ${hod.hoursWithActivity} of the 24 hours — this looks like a working-hours pattern, not round-the-clock use.`;
+
+  const covCards = cov
+    ? `${kpiCard('Active-day coverage', cov.coveragePct === null ? 'n/a' : `${fmtNum(cov.coveragePct, 1)}%`, `${fmtInt(cov.activeDays)} active day(s) out of ${fmtInt(cov.totalCalendarDays)} calendar days between ${cov.firstActiveDate} and ${cov.lastActiveDate}.`)}
+      ${kpiCard('Longest streak', `${fmtInt(cov.longestStreakDays)} day(s)`, 'The longest unbroken run of consecutive active days.')}
+      ${kpiCard('Longest quiet gap', `${fmtInt(cov.longestGapDays)} day(s)`, 'The longest run of consecutive days with no recorded activity at all.')}`
+    : '';
+  const hodCard = hod ? kpiCard('Hour-of-day spread', `${fmtInt(hod.hoursWithActivity)} / 24 hours`, spreadVerdict) : '';
+
+  const cachedChart = cachedRows.length
+    ? `<h3>Messages per active day (all-time, usage cache)</h3>
+  ${timeSeriesBars(cachedRows, { valueLabel: 'messages per day' })}
+  <p class="muted">One bar per day the usage cache recorded any activity (${cachedRows.length} days), through ${esc(rd.period.lastComputedDate ?? 'its last computation')}. Gaps in the axis are days with zero activity, not zero-height bars.</p>`
+    : '';
+
+  const recentChart = recentRows.length
+    ? `<h3>Claude-working events per day (recent, live from transcripts)</h3>
+  ${timeSeriesBars(recentRows, { valueLabel: 'Claude-working events per day' })}
+  <p class="muted">One bar per day still-on-disk transcripts recorded Claude working (${recentRows.length} days). Uses a different definition than the cached chart above (see &ldquo;How to read this page&rdquo;) - do not add the two together.</p>`
+    : '';
+
+  const hodChart = hod
+    ? `<h3>What hour of day work happens</h3>
+  <p class="callout callout-info">This counts every assistant turn and tool round-trip as &ldquo;Claude working&rdquo;, across main sessions, subagents, and workflow agents - so a session you left running unattended overnight or for days shows up as hours of activity, not one entry at whatever hour you started it. &ldquo;Your prompts&rdquo; counts only genuine human-typed messages in main sessions, separately.</p>
+  ${hourOfDayChart(hod.hours, { businessStart: BUSINESS_HOUR_START, businessEnd: BUSINESS_HOUR_END })}
+  <p class="muted">${fmtNum(hod.businessHoursSharePct, 1)}% of all Claude-working events fell inside a conventional 09:00&ndash;17:00 workday; the rest happened outside it, including any overnight or multi-day unattended runs.</p>`
+    : '';
 
   return `<p class="callout callout-info"><strong>What &ldquo;uptime&rdquo; means here.</strong> Claude Code is an interactive CLI, not a server, so there is no process to ask &ldquo;was it running 24/7&rdquo;. The closest honest signal transcripts and the usage cache can give is <em>presence</em>: on how many days did you actually use it, and at what hours. That is what this section shows.</p>
   <div class="kpi-grid">
-    ${kpiCard('Active-day coverage', cov.coveragePct === null ? 'n/a' : `${fmtNum(cov.coveragePct, 1)}%`, `${fmtInt(cov.activeDays)} active day(s) out of ${fmtInt(cov.totalCalendarDays)} calendar days between ${cov.firstActiveDate} and ${cov.lastActiveDate}.`)}
-    ${kpiCard('Longest streak', `${fmtInt(cov.longestStreakDays)} day(s)`, 'The longest unbroken run of consecutive active days.')}
-    ${kpiCard('Longest quiet gap', `${fmtInt(cov.longestGapDays)} day(s)`, 'The longest run of consecutive days with no recorded activity at all.')}
-    ${kpiCard('Hour-of-day spread', `${fmtInt(hod.hoursWithActivity)} / 24 hours`, spreadVerdict)}
+    ${covCards}
+    ${hodCard}
   </div>
-  <h3>Messages per active day, over the full history</h3>
-  ${timeSeriesBars(dailyRows, { valueLabel: 'messages per day' })}
-  <p class="muted">One bar per day that had any recorded activity (${dailyRows.length} days). Gaps in the axis are days with zero activity, not zero-height bars.</p>
-  <h3>What hour of day work happens</h3>
-  ${hourOfDayChart(hod.hours, { businessStart: BUSINESS_HOUR_START, businessEnd: BUSINESS_HOUR_END })}
-  <p class="muted">${fmtNum(hod.businessHoursSharePct, 1)}% of all recorded activity fell inside a conventional 09:00&ndash;17:00 workday.</p>`;
+  ${cachedChart}
+  ${recentChart}
+  ${hodChart}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +158,22 @@ function steadinessSection(rd) {
 
 function tokenSection(rd) {
   const t = rd.tokens;
-  if (!t.totals) return '<p class="callout callout-warn">No token-usage cache available on this machine.</p>';
+  if (!t.totals) return '<p class="callout callout-warn">No token usage data available - no usage cache and no priced turns found in transcripts still on disk.</p>';
+
+  const stale = rd.period.staleness;
+  const stalenessNote =
+    stale && stale.daysSinceComputed !== null
+      ? `<p class="callout ${stale.daysSinceComputed > 3 ? 'callout-warn' : 'callout-info'}"><strong>Usage cache is ${fmtInt(stale.daysSinceComputed)} day(s) old</strong> (last computed ${esc(stale.lastComputedDate)}).${
+          t.liveSupplementTotal > 0
+            ? ` ${fmtInt(t.liveSupplementTotal)} tokens since then were recovered from transcripts still on disk and are already included in the totals below - this is what makes a recently-adopted model (e.g. Sonnet 5, Opus 5) show up even though the cache itself hasn't recomputed.`
+            : ' No transcripts newer than the cache were found on disk to supplement it with, so any model or activity newer than the cache date is not reflected below.'
+        }${
+          stale.unrecoverableGapDays
+            ? ` There is also a gap of roughly ${fmtInt(stale.unrecoverableGapDays)} day(s) between the cache date and the oldest transcript still on disk that neither source can fill - permanently unrecoverable.`
+            : ''
+        }</p>`
+      : '';
+
   const bar = stackedShareBar([
     { label: 'Cache read', value: t.totals.cacheReadTokens, valueText: fmtInt(t.totals.cacheReadTokens), colorVar: 'series-1' },
     { label: 'Cache write', value: t.totals.cacheCreationTokens, valueText: fmtInt(t.totals.cacheCreationTokens), colorVar: 'series-2' },
@@ -154,14 +197,14 @@ function tokenSection(rd) {
     )
     .join('');
 
-  return `${bar}
+  return `${stalenessNote}${bar}
   <h3>Estimated spend by model</h3>
   ${modelChart}
   <table>
     <thead><tr><th>Model</th><th class="num">Total tokens</th><th class="num">Estimated cost</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="3" class="muted">no per-model data</td></tr>'}</tbody>
   </table>
-  <p class="muted">Priced with the same list-rate table <code>--baseline</code>/<code>--compare</code> use (version ${esc(t.costModelNotes.priceTableVersion)}), applied here to Claude Code's own all-time token cache rather than to a scanned transcript window. No per-model TTL cache-write split is recorded in that cache, so cache writes are costed at the flat ${t.costModelNotes.cacheWriteFallbackMultiplier}&times; rate throughout (see <code>--help</code> report for the exact/flat distinction).</p>`;
+  <p class="muted">Priced with the same list-rate table <code>--baseline</code>/<code>--compare</code> use (version ${esc(t.costModelNotes.priceTableVersion)}). Combines Claude Code's own all-time token cache with anything newer found live in transcripts still on disk (see note above). No per-model TTL cache-write split is recorded in the cached portion, so cache writes are costed at the flat ${t.costModelNotes.cacheWriteFallbackMultiplier}&times; rate throughout (see <code>--help</code> report for the exact/flat distinction).</p>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -221,8 +264,10 @@ function methodSection(rd) {
   return `<div class="explainer">
     <h3>Where this data comes from</h3>
     <ul>
-      <li><strong>All-time figures</strong> (sessions, messages, hour-of-day, daily activity, token totals) come from Claude Code's own <code>stats-cache.json</code>, last computed <strong>${esc(rd.period.lastComputedDate ?? 'unknown')}</strong>. It persists across transcript rotation, so it is the only source here with a history longer than about 30 days.</li>
-      <li><strong>Commits, pushes, worktrees and lines written/edited</strong> come from a fresh read of every transcript file still on disk${merged ? ' on each merged machine' : ` under <code>${esc(rd.claudeDir)}</code>`} (${fmtInt(rd.scan.filesScanned)} files total this run). Local transcripts rotate after roughly 30 days, so these figures only cover recent activity even though the page is titled by the tool's full lifetime.</li>
+      <li><strong>All-time sessions/messages figures</strong> come from Claude Code's own <code>stats-cache.json</code>, last computed <strong>${esc(rd.period.lastComputedDate ?? 'unknown')}</strong>. It persists across transcript rotation, so it is the only source here with a history longer than about 30 days - but it is only recomputed by Claude Code on its own schedule, not on every run, so it can lag behind today.</li>
+      <li><strong>Hour-of-day and daily &ldquo;Claude working&rdquo;/&ldquo;your prompts&rdquo; activity</strong> are computed independently, directly from transcript timestamps still on disk, not from the cache. An earlier version of this report used the cache's <code>hourCounts</code> field instead; an audit found it counts one entry per <em>session start</em>, not per unit of activity, so a session left running unattended for hours or days registered identically to a 30-second one. The chart below fixes that by counting every assistant turn and tool round-trip as activity, across the whole span of a session.</li>
+      <li><strong>Token/model totals</strong> combine the cached totals with anything newer found live in transcripts still on disk (deduplicated by message id, so nothing is double-counted) - this is what lets a model adopted after the cache's last computation (e.g. a newly-released model) still show up in the cost breakdown.</li>
+      <li><strong>Commits, pushes, worktrees and lines written/edited</strong> come from that same fresh read of every transcript file still on disk${merged ? ' on each merged machine' : ` under <code>${esc(rd.claudeDir)}</code>`} (${fmtInt(rd.scan.filesScanned)} files total this run). Local transcripts rotate after roughly 30 days, so these figures only cover recent activity even though the page is titled by the tool's full lifetime.</li>
     </ul>
     ${
       merged

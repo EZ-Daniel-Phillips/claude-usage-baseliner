@@ -26,7 +26,11 @@ function readJson(filePath) {
 //   modelUsage: { [model]: { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, ... } }
 //   totalSessions, totalMessages, firstSessionDate, lastComputedDate
 //   longestSession: { sessionId, duration (ms), messageCount, timestamp }
-//   hourCounts: { [hour 0-23]: count }
+//
+// Also carries an hourCounts field, deliberately not read here: an audit against real data proved it
+// is a per-session-start histogram (sum(hourCounts) === totalSessions, exactly), not an activity
+// histogram, so it cannot answer "what hour did work happen" - see report/activityMetrics.js, which
+// computes that instead from live transcript timestamps.
 export function readStatsCache(claudeDir) {
   const data = readJson(path.join(claudeDir, 'stats-cache.json'));
   if (!data || typeof data !== 'object') return null;
@@ -39,6 +43,5 @@ export function readStatsCache(claudeDir) {
     totalMessages: typeof data.totalMessages === 'number' ? data.totalMessages : null,
     firstSessionDate: data.firstSessionDate ?? null,
     longestSession: data.longestSession ?? null,
-    hourCounts: data.hourCounts && typeof data.hourCounts === 'object' ? data.hourCounts : {},
   };
 }

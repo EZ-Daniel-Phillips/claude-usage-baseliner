@@ -47,6 +47,9 @@ function flattenSources(rd) {
   return [{ claudeDir: rd.claudeDir, generatedAt: rd.generatedAt, id: rd.id, filesScanned: rd.scan?.filesScanned ?? 0 }];
 }
 
+// Cached (stats-cache.json-shaped) daily activity - messageCount/sessionCount/toolCallCount, summed
+// by date. Kept as its own series, never blended with recentDailyActivity below, since the two use
+// different definitions of "activity" (see activityMetrics.js's header comment).
 function mergeDailyActivity(list) {
   const byDate = new Map();
   for (const rd of list) {
@@ -61,14 +64,43 @@ function mergeDailyActivity(list) {
   return [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }
 
+// Live/recent (transcript-derived) daily activity - claudeEvents/humanPrompts/sessionsStarted, summed
+// by date across sources.
+function mergeRecentDailyActivity(list) {
+  const byDate = new Map();
+  for (const rd of list) {
+    for (const d of rd.recentDailyActivity ?? []) {
+      const cur = byDate.get(d.date) ?? { date: d.date, claudeEvents: 0, humanPrompts: 0, sessionsStarted: 0 };
+      cur.claudeEvents += d.claudeEvents ?? 0;
+      cur.humanPrompts += d.humanPrompts ?? 0;
+      cur.sessionsStarted += d.sessionsStarted ?? 0;
+      byDate.set(d.date, cur);
+    }
+  }
+  return [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+}
+
+function activeDatesFromCachedDaily(dailyActivity) {
+  return dailyActivity.filter((d) => (d.messageCount ?? 0) > 0 || (d.sessionCount ?? 0) > 0).map((d) => d.date);
+}
+
+function activeDatesFromRecentDaily(dailyActivity) {
+  return dailyActivity.filter((d) => (d.claudeEvents ?? 0) > 0 || (d.humanPrompts ?? 0) > 0).map((d) => d.date);
+}
+
+// Sums the two per-hour series (claudeWorking/humanPrompts) across sources before recomputing
+// percentages/shares - never averages already-derived per-source shares.
 function mergeHourOfDay(list) {
   if (!list.some((rd) => rd.hourOfDay)) return null;
-  const hourCounts = {};
-  for (let h = 0; h < 24; h++) hourCounts[String(h)] = 0;
+  const claudeWorking = new Array(24).fill(0);
+  const humanPrompts = new Array(24).fill(0);
   for (const rd of list) {
-    for (const entry of rd.hourOfDay?.hours ?? []) hourCounts[String(entry.hour)] += entry.count;
+    for (const entry of rd.hourOfDay?.hours ?? []) {
+      claudeWorking[entry.hour] += entry.claudeWorking ?? 0;
+      humanPrompts[entry.hour] += entry.humanPrompts ?? 0;
+    }
   }
-  return buildHourOfDay(hourCounts);
+  return buildHourOfDay({ claudeWorking, humanPrompts });
 }
 
 function mergeTokens(list) {
@@ -104,7 +136,8 @@ function mergeTokens(list) {
     : null;
 
   const cost = byModelArr.length ? estimateCostByModel(byModelArr) : null;
-  return { totals, byModel: byModelArr, cost, costModelNotes: COST_MODEL_NOTES };
+  const liveSupplementTotal = sumBy(list, (rd) => rd.tokens?.liveSupplementTotal);
+  return { totals, byModel: byModelArr, cost, costModelNotes: COST_MODEL_NOTES, liveSupplementTotal };
 }
 
 function mergeTools(list) {
@@ -129,6 +162,8 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt } = {}
   const sources = valid.flatMap(flattenSources);
 
   const dailyActivity = mergeDailyActivity(valid);
+  const recentDailyActivity = mergeRecentDailyActivity(valid);
+  const activeDates = [...activeDatesFromCachedDaily(dailyActivity), ...activeDatesFromRecentDaily(recentDailyActivity)];
   const recentSessionCount = sumBy(valid, (rd) => rd.sessions?.recentWindow?.count);
   const recentTotalDurationMs = sumBy(valid, (rd) => rd.sessions?.recentWindow?.totalDurationMs);
   const worktreeLabels = unionArrays(valid.map((rd) => rd.worktrees?.projectTraceLabels ?? []));
@@ -148,10 +183,14 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt } = {}
       lastComputedDate: maxString(valid.map((rd) => rd.period?.lastComputedDate).filter(Boolean)),
       recentWindowStart: minString(valid.map((rd) => rd.period?.recentWindowStart).filter(Boolean)),
       recentWindowEnd: maxString(valid.map((rd) => rd.period?.recentWindowEnd).filter(Boolean)),
+      // Per-source staleness (each machine has its own stats-cache.json, computed on its own
+      // schedule) doesn't collapse into one meaningful figure - see each source's own report instead.
+      staleness: null,
     },
-    coverage: dailyActivity.length ? buildCoverage(dailyActivity) : null,
+    coverage: activeDates.length ? buildCoverage(activeDates) : null,
     hourOfDay: mergeHourOfDay(valid),
     dailyActivity,
+    recentDailyActivity,
     sessions: {
       totalAllTime: sumOrNull(valid, (rd) => rd.sessions?.totalAllTime),
       totalMessagesAllTime: sumOrNull(valid, (rd) => rd.sessions?.totalMessagesAllTime),
