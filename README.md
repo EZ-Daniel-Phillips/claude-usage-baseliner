@@ -96,6 +96,18 @@ subagent's opening message is its parent's injected task text, not something you
 unattended multi-hour or multi-day run should show up as hours of Claude-working activity, not one
 entry at whatever hour it was started.
 
+**"Your prompts" excludes Claude Code's own system-injected turns, not just tool results.** A second
+audit - after real background/loop usage still showed up as human activity at hours the user knew they
+hadn't typed anything - found that a plain, non-tool-result "user" line isn't automatically something a
+human typed either: roughly half of them in a real sample were background task/subagent notifications,
+messages from another agent/teammate, scheduled-loop or cron check-ins resuming, skill payloads, or
+slash-command artifacts, all of which can land at any hour regardless of when you were actually at the
+keyboard. These are told apart using the transcript's own `isMeta`/`promptSource` fields where present
+(`system`/`sdk` sources, and anything marked `isMeta`, are excluded; `typed`/`queued`/
+`suggestion_accepted` count as human even inside a background session), falling back to matching known
+synthetic message shapes where those fields aren't set. See `isSyntheticUserLine()` in
+`src/scan/activityScanner.js` for the exact rule.
+
 **A stale cache blocks the run by default.** `/stats` inside Claude Code is the only known way to
 force a recompute (see below), so `--visualise` checks `lastComputedDate` before scanning anything: if
 the cache is more than `--max-cache-age` days old (default 2), it prompts to continue anyway when run

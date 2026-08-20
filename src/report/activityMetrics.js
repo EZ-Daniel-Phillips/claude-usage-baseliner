@@ -88,8 +88,11 @@ function activeDatesFromRecentDaily(dailyActivity) {
 
 // Hour-of-day usage shape: two independent series - "Claude working" (assistant turns and tool
 // round-trips, every tier, the signal that actually shows unattended/overnight activity) and "human
-// prompts" (genuine human-authored lines, main tier only). Business-hours share is computed against
-// the "Claude working" series since it is the more complete signal.
+// prompts" (genuine keystroke-driven lines, main tier only - see scan/activityScanner.js's
+// isSyntheticUserLine() for how system-injected turns like background notifications, teammate
+// messages, and scheduled-loop check-ins are told apart from something a human actually typed).
+// Business-hours share is computed against the "Claude working" series since it is the more complete
+// signal.
 export const BUSINESS_HOUR_START = 9;
 export const BUSINESS_HOUR_END = 17; // exclusive
 

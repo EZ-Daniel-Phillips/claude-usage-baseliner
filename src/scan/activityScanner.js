@@ -29,10 +29,17 @@ import { verbose } from '../util/log.js';
 //       "claude working"  - any assistant turn, or any user-role line carrying a tool_result (a tool
 //                            round-trip), across every tier (main/subagent/workflow-agent) - this is
 //                            what actually shows Claude active overnight/unattended.
-//       "human prompt"     - a genuine human-authored user line (content is a plain string, or an
-//                            array with no tool_result block), counted only in 'main' tier files -
+//       "human prompt"     - a genuine keystroke-driven user line, counted only in 'main' tier files -
 //                            a subagent's opening "user" line is its parent's injected task text, not
 //                            something a human typed, so subagent/workflow-agent tiers never count here.
+//                            A second audit (after real overnight/unattended usage still showed up as
+//                            "human" activity at hours the user knew they hadn't typed anything) found
+//                            that a plain non-tool_result user line isn't automatically human-authored
+//                            either - roughly half of them in a real sample were Claude Code's own
+//                            system-injected turns (background task/subagent notifications, teammate
+//                            messages, scheduled-loop/cron check-ins, skill payloads, slash-command
+//                            artifacts). See isSyntheticUserLine() below for the structural fields
+//                            (`isMeta`, `promptSource`) and text-prefix fallback used to exclude these.
 //   - token/model totals: stats-cache.json's modelUsage is frozen as of lastComputedDate and does not
 //     update again until Claude Code itself recomputes it (observed 44+ days stale on the machine this
 //     was built against, hiding newer models entirely). report/activityMetrics.js supplements the
@@ -71,6 +78,54 @@ function bumpDaily(map, date, key, by = 1) {
   const row = map.get(date) ?? { claudeEvents: 0, humanPrompts: 0 };
   row[key] += by;
   map.set(date, row);
+}
+
+// A "user"-role line with no tool_result isn't automatically something a human typed - Claude Code
+// itself injects several kinds of system-generated turn onto the user side of the transcript: a
+// background subagent/task finishing, a message from another agent/teammate, a scheduled-loop/cron
+// check-in resuming, an injected system reminder, a local slash command's synthesized result, a
+// skill's injected payload, or a post-compaction "session is being continued" resume. All of these
+// can land at any hour - whenever the background work actually finishes, not when a human was at the
+// keyboard - so counting them as "human prompts" produces exactly the failure mode an audit against
+// real data confirmed: apparent overnight/unattended activity nobody actually typed, in some real
+// transcripts from unattended background/loop sessions running for hours.
+//
+// Two structural fields on the transcript line - not present on every line, but authoritative when
+// present - do this far more reliably than matching on message text:
+//   - `isMeta: true` marks harness-injected content (skill-invocation payloads, local slash-command
+//     output, and similar) - never seen alongside a genuine keystroke-driven promptSource in a real
+//     corpus, so it is checked first regardless of promptSource.
+//   - `promptSource` distinguishes 'system' (background loop/task check-ins and notifications
+//     delivered as a resumed turn) and 'sdk' (programmatic/SDK-driven turns) from genuine
+//     keystroke-driven turns - 'typed', 'queued' (typed while Claude was still busy, delivered
+//     moments later), and 'suggestion_accepted' (a human accepting an auto-suggested action) all
+//     still count as a human prompt, even inside a background-launched session.
+// Neither field is present on some lines (slash-command artifact lines, which never set
+// promptSource at all) - those fall back to matching known synthetic text prefixes. In a ~400-file
+// audit of this corpus, roughly half of all non-tool_result "user" lines were one of these synthetic
+// cases (task-notification and teammate-message alone were ~34% combined). Excluded from both
+// counters entirely (not reassigned to "Claude working") since none of them are an assistant turn or
+// tool round-trip either.
+const SYNTHETIC_USER_TEXT_PREFIXES = [
+  '<task-notification',
+  '<teammate-message',
+  'Another Claude session sent a message', // teammate-message is prefixed with this framing sentence
+  '<system-reminder',
+  '<local-command-caveat',
+  '<local-command-stdout',
+  '<command-name',
+  '<command-message',
+  'This session is being continued from a previous conversation',
+];
+
+function isSyntheticUserLine(obj) {
+  if (obj.isMeta === true) return true;
+  if (obj.promptSource === 'system' || obj.promptSource === 'sdk') return true;
+  if (obj.promptSource !== undefined) return false; // an explicit human-driven source (typed/queued/suggestion_accepted/...)
+  const content = obj.message?.content;
+  if (typeof content !== 'string') return false;
+  const trimmed = content.trimStart();
+  return SYNTHETIC_USER_TEXT_PREFIXES.some((p) => trimmed.startsWith(p));
 }
 
 export async function scanActivity(claudeDir) {
@@ -164,9 +219,10 @@ export async function scanActivity(claudeDir) {
           if (isToolResult) {
             hourClaudeWorking[localHour] += 1;
             bumpDaily(dailyEvents, date, 'claudeEvents');
-          } else if (fileDesc.tier === 'main') {
+          } else if (fileDesc.tier === 'main' && !isSyntheticUserLine(obj)) {
             // A subagent/workflow-agent's opening "user" line is its parent's injected task text, not
-            // something a human typed - restricting to 'main' excludes that by construction.
+            // something a human typed - restricting to 'main' excludes that by construction. See
+            // isSyntheticUserLine() for the other system-generated cases this also excludes.
             hourHumanPrompts[localHour] += 1;
             bumpDaily(dailyEvents, date, 'humanPrompts');
           }
