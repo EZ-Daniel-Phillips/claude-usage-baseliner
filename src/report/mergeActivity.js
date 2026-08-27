@@ -1,5 +1,5 @@
 import { estimateCostByModel, COST_MODEL_NOTES } from './cost.js';
-import { buildCoverage, buildHourOfDay } from './activityMetrics.js';
+import { buildCoverage, buildHourOfDay, buildPromptHours } from './activityMetrics.js';
 
 // Combines two or more --visualise report-data objects (the JSON --visualise writes) into one, so
 // activity from separate machines - each with its own ~/.claude, its own stats-cache.json, its own
@@ -91,16 +91,69 @@ function activeDatesFromRecentDaily(dailyActivity) {
 // Sums the two per-hour series (claudeWorking/humanPrompts) across sources before recomputing
 // percentages/shares - never averages already-derived per-source shares.
 function mergeHourOfDay(list) {
-  if (!list.some((rd) => rd.hourOfDay)) return null;
+  const withHours = list.filter((rd) => rd.hourOfDay);
+  if (!withHours.length) return null;
   const claudeWorking = new Array(24).fill(0);
   const humanPrompts = new Array(24).fill(0);
-  for (const rd of list) {
+  for (const rd of withHours) {
     for (const entry of rd.hourOfDay?.hours ?? []) {
       claudeWorking[entry.hour] += entry.claudeWorking ?? 0;
       humanPrompts[entry.hour] += entry.humanPrompts ?? 0;
     }
   }
-  return buildHourOfDay({ claudeWorking, humanPrompts });
+  // Only claim the merged prompts series covers full lifetimes if every contributing source's did -
+  // one machine missing history.jsonl makes the combined series a mixture, and the weaker claim is
+  // the true one.
+  const humanPromptsSource = withHours.every((rd) => rd.hourOfDay?.humanPromptsSource === 'history') ? 'history' : 'transcripts';
+  return buildHourOfDay({ claudeWorking, humanPrompts, humanPromptsSource });
+}
+
+// Full-lifetime typed-prompt hours. Summed per hour across machines before percentages/shares are
+// recomputed, exactly as mergeHourOfDay() does - each machine has its own history.jsonl covering its
+// own keystrokes, so nothing here can double-count. The span becomes the union of the sources' spans
+// (earliest first prompt, latest last prompt) rather than any kind of total, and monthly counts are
+// summed by month.
+function mergePromptHours(list) {
+  const withPromptHours = list.filter((rd) => rd.promptHours);
+  if (!withPromptHours.length) return null;
+
+  const hours = new Array(24).fill(0);
+  const monthly = new Map();
+  let firstTs = null;
+  let lastTs = null;
+  let slashCommands = 0;
+  let distinctSessions = 0;
+  let distinctProjects = 0;
+
+  for (const rd of withPromptHours) {
+    const ph = rd.promptHours;
+    for (const entry of ph.hours ?? []) hours[entry.hour] += entry.prompts ?? 0;
+    for (const m of ph.monthly ?? []) monthly.set(m.month, (monthly.get(m.month) ?? 0) + (m.prompts ?? 0));
+    const first = ph.firstPromptAt ? Date.parse(ph.firstPromptAt) : NaN;
+    const last = ph.lastPromptAt ? Date.parse(ph.lastPromptAt) : NaN;
+    if (!Number.isNaN(first) && (firstTs === null || first < firstTs)) firstTs = first;
+    if (!Number.isNaN(last) && (lastTs === null || last > lastTs)) lastTs = last;
+    slashCommands += ph.slashCommands ?? 0;
+    // Session ids are machine-local uuids and project keys are machine-local paths, and the report
+    // JSON carries only each source's *count* of them, not the values, so these are summed with the
+    // same caveat as worktree names: two machines sharing an identical checkout path would overcount.
+    distinctSessions += ph.distinctSessions ?? 0;
+    distinctProjects += ph.distinctProjects ?? 0;
+  }
+
+  // Rebuilt through the same builder --visualise itself uses, so a merged report is the identical
+  // shape and every derived share is recomputed from combined counts rather than averaged.
+  return buildPromptHours({
+    hours,
+    firstTs,
+    lastTs,
+    slashCommands,
+    distinctSessions,
+    distinctProjects,
+    monthly: [...monthly.entries()]
+      .map(([month, prompts]) => ({ month, prompts }))
+      .sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0)),
+  });
 }
 
 function mergeTokens(list) {
@@ -189,6 +242,7 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt } = {}
     },
     coverage: activeDates.length ? buildCoverage(activeDates) : null,
     hourOfDay: mergeHourOfDay(valid),
+    promptHours: mergePromptHours(valid),
     dailyActivity,
     recentDailyActivity,
     sessions: {

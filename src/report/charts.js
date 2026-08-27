@@ -314,56 +314,87 @@ export function timeSeriesBars(rows, { width = 860, height = 220, valueLabel = '
 // ---------------------------------------------------------------------------
 // Hour-of-day bars (24 hours, two series: Claude working vs. your prompts)
 // ---------------------------------------------------------------------------
-// "Claude working" (assistant turns + tool round-trips, every tier) and "your prompts" (genuine
-// human-authored lines, main tier only) are shown as paired bars, each scaled as a share of that
-// series' own total - the two series can differ by an order of magnitude in raw count (many tool
-// round-trips per human prompt), so plotting raw counts on one shared scale would make the smaller
-// series invisible. Business hours are shown as a shaded background band rather than bar colour,
-// since bar colour now identifies the series instead.
-export function hourOfDayChart(hours, { width = 860, height = 220, businessStart = 9, businessEnd = 17 } = {}) {
+// One chart, one pair of keys. The two series are "Claude working" (assistant turns + tool
+// round-trips, every tier) and "your prompts" (what you typed), each scaled as a share of its OWN
+// total: the two differ by an order of magnitude in raw count (many tool round-trips per prompt), so
+// plotting them against one shared scale would flatten the smaller series into invisibility. Which
+// file each series was read out of is a provenance question, answered once in the report's method
+// section - it is not encoded in the chart, and does not get its own series or key here.
+//
+// Every hour gets its own labelled tick (00-23, two-digit) rather than every third one: the hours this
+// chart exists to expose are individually interesting (was that 22:00 or 23:00?), and a reader across
+// the room cannot count unlabelled slots. Business hours and the late-night/overnight band are shaded
+// backgrounds, since bar colour is already carrying series identity. Exact per-hour counts for both
+// series live in the native <title> tooltips and in the KPI cards beside the chart.
+const HOUR_SLOTS = 24;
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+export function hourOfDayChart(
+  hours,
+  {
+    width = 980,
+    height = 280,
+    businessStart = 9,
+    businessEnd = 17,
+    lateNightStart = 22,
+    lateNightEnd = 6,
+    promptsLabel = 'Your prompts (what you typed)',
+  } = {}
+) {
   if (!hours.length) return '<p class="muted">No data.</p>';
   const padL = 46;
   const padR = 10;
-  const padT = 14;
-  const padB = 26;
+  const padT = 16;
+  const padB = 30;
   const plotW = width - padL - padR;
   const plotH = height - padT - padB;
   const max = Math.max(...hours.map((h) => Math.max(h.pctClaudeWorking ?? 0, h.pctHumanPrompts ?? 0))) || 1;
   const slotW = plotW / hours.length;
-  const barW = Math.max(0.6, slotW / 2 - 1.5);
+  const barW = Math.max(0.6, (slotW - 2) / 2 - 1.5);
   const sy = (v) => padT + plotH - (v / max) * plotH;
-  const pad2 = (n) => String(n).padStart(2, '0');
 
-  const businessBand =
-    businessEnd > businessStart
-      ? `<rect x="${(padL + businessStart * slotW).toFixed(1)}" y="${padT}" width="${((businessEnd - businessStart) * slotW).toFixed(1)}" height="${plotH.toFixed(1)}" fill="var(--neutral-bg)"/>`
+  const band = (from, to, fill) =>
+    `<rect x="${(padL + from * slotW).toFixed(1)}" y="${padT}" width="${((to - from) * slotW).toFixed(1)}" height="${plotH.toFixed(1)}" fill="${fill}"/>`;
+
+  // The late-night band wraps midnight (e.g. 22:00-06:00), so it draws as two rects, not one.
+  const lateBands =
+    lateNightStart !== null && lateNightEnd !== null
+      ? `${band(lateNightStart, HOUR_SLOTS, 'var(--info-bg)')}${lateNightEnd > 0 ? band(0, lateNightEnd, 'var(--info-bg)') : ''}`
       : '';
+  const businessBand = businessEnd > businessStart ? band(businessStart, businessEnd, 'var(--neutral-bg)') : '';
 
   const bars = hours
     .map((h, i) => {
-      const xSlot = padL + i * slotW;
+      const xSlot = padL + i * slotW + 1;
       const cw = h.pctClaudeWorking ?? 0;
       const hp = h.pctHumanPrompts ?? 0;
-      const cwH = Math.max(0.5, (cw / max) * plotH);
-      const hpH = Math.max(0.5, (hp / max) * plotH);
+      const cwH = Math.max(cw > 0 ? 1.5 : 0.5, (cw / max) * plotH);
+      const hpH = Math.max(hp > 0 ? 1.5 : 0.5, (hp / max) * plotH);
       return `<g>
         <rect class="bar-a" x="${xSlot.toFixed(2)}" y="${sy(cw).toFixed(1)}" width="${barW.toFixed(2)}" height="${cwH.toFixed(1)}" rx="1.5"><title>${pad2(h.hour)}:00 &ndash; Claude working: ${fmtCompact(h.claudeWorking)} events (${cw.toFixed(1)}% of all Claude-working events)</title></rect>
-        <rect class="bar-b" x="${(xSlot + barW + 1.5).toFixed(2)}" y="${sy(hp).toFixed(1)}" width="${barW.toFixed(2)}" height="${hpH.toFixed(1)}" rx="1.5"><title>${pad2(h.hour)}:00 &ndash; your prompts: ${fmtCompact(h.humanPrompts)} (${hp.toFixed(1)}% of all your prompts)</title></rect>
-        <text class="tick" x="${(xSlot + slotW / 2).toFixed(1)}" y="${padT + plotH + 14}" text-anchor="middle">${h.hour % 3 === 0 ? h.hour : ''}</text>
+        <rect class="bar-b" x="${(xSlot + barW + 1.5).toFixed(2)}" y="${sy(hp).toFixed(1)}" width="${barW.toFixed(2)}" height="${hpH.toFixed(1)}" rx="1.5"><title>${pad2(h.hour)}:00 &ndash; your prompts: ${(h.humanPrompts ?? 0).toLocaleString('en-US')} (${hp.toFixed(1)}% of all your prompts)</title></rect>
+        <text class="tick" x="${(xSlot + (slotW - 2) / 2).toFixed(1)}" y="${padT + plotH + 16}" text-anchor="middle">${pad2(h.hour)}</text>
       </g>`;
     })
     .join('');
 
   return `<figure class="chart">
     <svg viewBox="0 0 ${width} ${height}" role="img" width="100%" preserveAspectRatio="xMidYMid meet" aria-label="Activity by hour of day, local time: Claude working versus your prompts">
+      ${lateBands}
       ${businessBand}
       ${bars}
       <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}"/>
+      <text class="axis-title" x="${padL}" y="${height - 4}">hour of day (local, 00&ndash;23)</text>
     </svg>
     <div class="legend">
       <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Claude working (assistant turns + tool round-trips)</span>
-      <span class="legend-item"><span class="swatch" style="background:var(--series-2)"></span>Your prompts (human-typed messages)</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--series-2)"></span>${esc(promptsLabel)}</span>
       <span class="legend-item muted">Shaded band: business hours (${pad2(businessStart)}:00&ndash;${pad2(businessEnd)}:00)</span>
+      ${lateNightStart !== null ? `<span class="legend-item muted">Second shaded band: late night / overnight (${pad2(lateNightStart)}:00&ndash;${pad2(lateNightEnd)}:00)</span>` : ''}
+      <span class="legend-item muted">Each series is scaled against its own total, not against each other</span>
     </div>
   </figure>`;
 }

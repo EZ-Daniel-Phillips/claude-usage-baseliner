@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import readline from 'node:readline/promises';
 import { readStatsCache } from '../scan/rootStats.js';
 import { scanActivity } from '../scan/activityScanner.js';
+import { readPromptHistory } from '../scan/promptHistory.js';
 import { buildActivityReportData } from '../report/activityMetrics.js';
 import { writeJsonReport } from '../report/json.js';
 import { renderVisualiseHtml } from '../report/visualiseHtml.js';
@@ -65,6 +66,13 @@ export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleC
   info(`Scanning transcripts under ${claudeDir} for activity (commits, worktrees, code written) ...`);
   const activityScan = await scanActivity(claudeDir);
 
+  // The hour-of-day chart's "your prompts" series comes from here rather than from the transcript scan
+  // above, because history.jsonl is not rotated with the transcripts and so covers the tool's whole
+  // history. A missing or unreadable file falls back to the transcript-derived prompt counts, which
+  // are the same measurement truncated at the retention window (see report/activityMetrics.js).
+  info(`Reading typed-prompt history (history.jsonl) for full-history hour-of-day coverage ...`);
+  const promptHistory = await readPromptHistory(claudeDir);
+
   const id = `visualise-${compactIsoTimestamp()}`;
   const reportData = buildActivityReportData({
     claudeDir,
@@ -72,6 +80,7 @@ export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleC
     generatedAt: new Date().toISOString(),
     statsCache,
     activityScan,
+    promptHistory,
   });
 
   const visualiseDir = getVisualiseDir();
@@ -84,7 +93,10 @@ export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleC
 
   info(
     `Visualise complete: ${activityScan.filesScanned.toLocaleString('en-US')} transcript files scanned` +
-      (statsCache ? `, ${(statsCache.totalSessions ?? 0).toLocaleString('en-US')} sessions on record since ${statsCache.firstSessionDate}` : ', no usage cache found')
+      (statsCache ? `, ${(statsCache.totalSessions ?? 0).toLocaleString('en-US')} sessions on record since ${statsCache.firstSessionDate}` : ', no usage cache found') +
+      (promptHistory
+        ? `, ${promptHistory.entries.toLocaleString('en-US')} typed prompts read from history.jsonl (full lifetime)`
+        : ', no history.jsonl found (lifetime prompt hours unavailable)')
   );
   info(`  JSON: ${jsonPath}`);
   info(`  HTML: ${htmlPath}`);

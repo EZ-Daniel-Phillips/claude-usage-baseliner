@@ -23,8 +23,10 @@ Options:
   --compare               Measure all activity since the last baseline and compare against it.
   --visualise             Build a dashboard of what you've done with Claude over its whole usage
                           history (sessions, activity/hour-of-day pattern, tokens, commits,
-                          worktrees, lines written). Independent of --baseline/--compare: never reads
-                          or writes state.json, and writes its own report under
+                          worktrees, lines written). Your prompt hour-of-day pattern covers the full
+                          lifetime, read from history.jsonl rather than the ~30-day transcript
+                          window. Independent of --baseline/--compare: never reads or writes
+                          state.json, and writes its own report under
                           claude-usage-baseliner/visualise/.
   --merge                 Combine two or more report JSON files of the same family (e.g. one dumped
                           from each of several machines) into a single merged JSON+HTML report. All
