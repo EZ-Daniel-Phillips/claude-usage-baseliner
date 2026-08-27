@@ -11,7 +11,7 @@
 
 import { STYLE, TV_STYLE } from './html.js';
 import { horizontalBars, stackedShareBar, timeSeriesBars, hourOfDayChart, fmtCompact } from './charts.js';
-import { BUSINESS_HOUR_START, BUSINESS_HOUR_END } from './activityMetrics.js';
+import { BUSINESS_HOUR_START, BUSINESS_HOUR_END, LATE_NIGHT_START, LATE_NIGHT_END } from './activityMetrics.js';
 
 function esc(str) {
   if (str === null || str === undefined) return '';
@@ -65,6 +65,13 @@ function section(title, bodyHtml, { lede, eyebrow } = {}) {
 </section>`;
 }
 
+// "23" -> "23:00". Used wherever a single hour is named in prose or a KPI value, so the page never
+// leaves a bare number that could be read as a count.
+function fmtHour(hour) {
+  if (hour === null || hour === undefined) return 'n/a';
+  return `${String(hour).padStart(2, '0')}:00`;
+}
+
 function kpiCard(label, value, meaning) {
   return `<div class="kpi kpi-neutral">
     <div class="kpi-label">${esc(label)}</div>
@@ -99,8 +106,9 @@ function headlineKpis(rd) {
 function steadinessSection(rd) {
   const cov = rd.coverage;
   const hod = rd.hourOfDay;
+  const ph = rd.promptHours;
   if (!cov && !hod) {
-    return '<p class="callout callout-warn"><strong>No activity data available.</strong> Neither the usage cache nor any transcripts still on disk have any recorded activity, so activity history and hour-of-day patterns cannot be shown.</p>';
+    return '<p class="callout callout-warn"><strong>No activity data available.</strong> Nothing this machine keeps - the usage cache, the transcripts still on disk, or the typed-prompt history - has any recorded activity, so activity history and hour-of-day patterns cannot be shown.</p>';
   }
 
   const cachedRows = (rd.dailyActivity ?? [])
@@ -118,6 +126,14 @@ function steadinessSection(rd) {
         ? `Claude has been working in ${hod.hoursWithActivity} of 24 hours — a wide spread, but with a clear quiet stretch.`
         : `Claude's working hours are concentrated in just ${hod.hoursWithActivity} of the 24 hours — this looks like a working-hours pattern, not round-the-clock use.`;
 
+  const lateVerdict = !ph
+    ? ''
+    : ph.lateNightPct >= 10
+      ? `A substantial ${fmtNum(ph.lateNightPct, 1)}% of every prompt you have typed landed in that band.`
+      : ph.lateNightPct >= 3
+        ? `${fmtNum(ph.lateNightPct, 1)}% of every prompt you have typed landed in that band - a real, recurring habit rather than a one-off.`
+        : `Only ${fmtNum(ph.lateNightPct, 1)}% of your prompts landed in that band.`;
+
   const covCards = cov
     ? `${kpiCard('Active-day coverage', cov.coveragePct === null ? 'n/a' : `${fmtNum(cov.coveragePct, 1)}%`, `${fmtInt(cov.activeDays)} active day(s) out of ${fmtInt(cov.totalCalendarDays)} calendar days between ${cov.firstActiveDate} and ${cov.lastActiveDate}.`)}
       ${kpiCard('Longest streak', `${fmtInt(cov.longestStreakDays)} day(s)`, 'The longest unbroken run of consecutive active days.')}
@@ -125,23 +141,51 @@ function steadinessSection(rd) {
     : '';
   const hodCard = hod ? kpiCard('Hour-of-day spread', `${fmtInt(hod.hoursWithActivity)} / 24 hours`, spreadVerdict) : '';
 
+  // Prompt-side KPIs sit in the same grid as the coverage ones rather than a second block: they are
+  // more facts about the same question ("when do you actually work"), not a different report.
+  const promptCards = ph
+    ? `${kpiCard('Prompts typed', fmtInt(ph.total), `Every prompt you have submitted, across ${fmtInt(ph.spanDays)} days and ${fmtInt(ph.distinctSessions)} sessions${ph.slashCommands ? `, including ${fmtInt(ph.slashCommands)} slash commands` : ''}.`)}
+      ${kpiCard('Busiest hour', fmtHour(ph.peakHour), `${fmtInt(ph.peakHourPrompts)} prompts (${fmtNum(ph.peakHourPct, 1)}% of the total) were typed in this hour.`)}
+      ${kpiCard('Late-night prompts', fmtInt(ph.lateNightPrompts), `Typed between ${fmtHour(LATE_NIGHT_START)} and ${fmtHour(LATE_NIGHT_END)}. ${lateVerdict}`)}
+      ${kpiCard('Hours you have prompted in', `${fmtInt(ph.hoursWithActivity)} / 24`, 'Distinct hours of the day in which you have typed at least one prompt.')}`
+    : '';
+
   const cachedChart = cachedRows.length
     ? `<h3>Messages per active day (all-time, usage cache)</h3>
   ${timeSeriesBars(cachedRows, { valueLabel: 'messages per day' })}
   <p class="muted">One bar per day the usage cache recorded any activity (${cachedRows.length} days), through ${esc(rd.period.lastComputedDate ?? 'its last computation')}. Gaps in the axis are days with zero activity, not zero-height bars.</p>`
     : '';
 
+  // One hour-of-day chart, two series. The prompts series covers everything you have ever typed; the
+  // Claude-working series covers what the transcripts still hold. That difference is a provenance
+  // detail, documented once in "How to read this page" - it is not a second chart, a third series, or
+  // an extra legend key here, because the reader's question ("what hours do I work?") is one question.
   const hodChart = hod
     ? `<h3>What hour of day work happens</h3>
-  <p class="callout callout-info">This counts every assistant turn and tool round-trip as &ldquo;Claude working&rdquo;, across main sessions, subagents, and workflow agents - so a session you left running unattended overnight or for days shows up as hours of activity, not one entry at whatever hour you started it. &ldquo;Your prompts&rdquo; counts only genuine human-typed messages in main sessions, separately.</p>
-  ${hourOfDayChart(hod.hours, { businessStart: BUSINESS_HOUR_START, businessEnd: BUSINESS_HOUR_END })}
-  <p class="muted">${fmtNum(hod.businessHoursSharePct, 1)}% of all Claude-working events fell inside a conventional 09:00&ndash;17:00 workday; the rest happened outside it, including any overnight or multi-day unattended runs.</p>`
+  <p class="callout callout-info">Two series, both by local hour. &ldquo;Claude working&rdquo; counts every assistant turn and tool round-trip across main sessions, subagents and workflow agents - so a session left running unattended overnight or for days shows up as hours of activity, not one entry at whatever hour you started it. &ldquo;Your prompts&rdquo; counts what you actually typed${ph ? `: ${fmtInt(ph.total)} prompts over ${fmtInt(ph.spanDays)} days, from ${fmtWhen(ph.firstPromptAt)} to ${fmtWhen(ph.lastPromptAt)}` : ''}. Each series is scaled against its own total, since a single prompt can set off dozens of tool round-trips.</p>
+  ${hourOfDayChart(hod.hours, {
+    businessStart: BUSINESS_HOUR_START,
+    businessEnd: BUSINESS_HOUR_END,
+    lateNightStart: LATE_NIGHT_START,
+    lateNightEnd: LATE_NIGHT_END,
+  })}
+  <p class="muted">${fmtNum(hod.businessHoursSharePct, 1)}% of all Claude-working events fell inside a conventional ${fmtHour(BUSINESS_HOUR_START)}&ndash;${fmtHour(BUSINESS_HOUR_END)} workday; the rest happened outside it, including any overnight or multi-day unattended runs.${
+    ph
+      ? ` On the prompt side, ${fmtNum(ph.businessHoursSharePct, 1)}% of what you typed landed inside those hours, and ${fmtInt(ph.lateNightPrompts)} prompt(s) (${fmtNum(ph.lateNightPct, 1)}%) landed between ${fmtHour(LATE_NIGHT_START)} and ${fmtHour(LATE_NIGHT_END)}.`
+      : ''
+  }</p>${
+    ph && ph.monthly.length
+      ? `
+  <p class="muted">Prompts per month: ${ph.monthly.map((m) => `${esc(m.month)} (${fmtInt(m.prompts)})`).join(', ')}.</p>`
+      : ''
+  }`
     : '';
 
-  return `<p class="callout callout-info"><strong>What &ldquo;uptime&rdquo; means here.</strong> Claude Code is an interactive CLI, not a server, so there is no process to ask &ldquo;was it running 24/7&rdquo;. The closest honest signal transcripts and the usage cache can give is <em>presence</em>: on how many days did you actually use it, and at what hours. That is what this section shows.</p>
+  return `<p class="callout callout-info"><strong>What &ldquo;uptime&rdquo; means here.</strong> Claude Code is an interactive CLI, not a server, so there is no process to ask &ldquo;was it running 24/7&rdquo;. The closest honest signal this machine can give is <em>presence</em>: on how many days did you actually use it, and at what hours. That is what this section shows.</p>
   <div class="kpi-grid">
     ${covCards}
     ${hodCard}
+    ${promptCards}
   </div>
   ${cachedChart}
   ${hodChart}`;
@@ -260,7 +304,7 @@ function methodSection(rd) {
     <h3>Where this data comes from</h3>
     <ul>
       <li><strong>All-time sessions/messages figures</strong> come from Claude Code's own <code>stats-cache.json</code>, last computed <strong>${esc(rd.period.lastComputedDate ?? 'unknown')}</strong>. It persists across transcript rotation, so it is the only source here with a history longer than about 30 days - but it is only recomputed by Claude Code on its own schedule, not on every run, so it can lag behind today.</li>
-      <li><strong>Hour-of-day and daily &ldquo;Claude working&rdquo;/&ldquo;your prompts&rdquo; activity</strong> are computed independently, directly from transcript timestamps still on disk, not from the cache. An earlier version of this report used the cache's <code>hourCounts</code> field instead; an audit found it counts one entry per <em>session start</em>, not per unit of activity, so a session left running unattended for hours or days registered identically to a 30-second one. The chart below fixes that by counting every assistant turn and tool round-trip as activity, across the whole span of a session. &ldquo;Your prompts&rdquo; also excludes Claude Code's own system-injected turns - background task/subagent notifications, teammate messages, scheduled-loop or cron check-ins, skill payloads, and slash-command artifacts - which a further audit found made up roughly half of all non-tool-result &ldquo;user&rdquo; lines in a real sample, and were previously counted as if you had typed them at whatever hour they happened to fire.</li>
+      <li><strong>The hour-of-day chart's two series come from two different files, and reach back different distances.</strong> &ldquo;Your prompts&rdquo; is read from <code>history.jsonl</code>, Claude Code's own log of every prompt typed into the prompt box, which is <em>not</em> rotated with the transcripts - so that series covers your whole history${rd.promptHours ? ` - ${fmtInt(rd.promptHours.spanDays)} days of it, back to ${esc((rd.promptHours.firstPromptAt ?? '').slice(0, 10))}` : ''}. &ldquo;Claude working&rdquo; is computed from transcript timestamps still on disk, which rotate after roughly 30 days; <code>history.jsonl</code> holds no record of Claude's side of the conversation, so the older part of that series is permanently gone and is left missing rather than estimated. The chart shows them together, each scaled against its own total, because the question they answer is one question - the difference in reach is recorded here rather than as a second chart. Neither series comes from the cache's <code>hourCounts</code> field: an audit found that counts one entry per <em>session start</em>, not per unit of activity, so a session left running unattended for hours or days registered identically to a 30-second one. &ldquo;Your prompts&rdquo; also excludes Claude Code's own system-injected turns - background task/subagent notifications, teammate messages, scheduled-loop or cron check-ins, skill payloads and slash-command artifacts - which a further audit found made up roughly half of all non-tool-result &ldquo;user&rdquo; lines in a real sample, and were previously counted as if you had typed them at whatever hour they happened to fire. Slash commands you did type are counted (typing <code>/clear</code> at 23:40 is still you at the keyboard at 23:40), and nothing is deduplicated, since typing the same prompt twice is two prompts.</li>
       <li><strong>Token/model totals</strong> combine the cached totals with anything newer found live in transcripts still on disk (deduplicated by message id, so nothing is double-counted) - this is what lets a model adopted after the cache's last computation (e.g. a newly-released model) still show up in the cost breakdown.</li>
       <li><strong>Commits, pushes, worktrees and lines written/edited</strong> come from that same fresh read of every transcript file still on disk${merged ? ' on each merged machine' : ` under <code>${esc(rd.claudeDir)}</code>`} (${fmtInt(rd.scan.filesScanned)} files total this run). Local transcripts rotate after roughly 30 days, so these figures only cover recent activity even though the page is titled by the tool's full lifetime.</li>
     </ul>
@@ -270,7 +314,7 @@ function methodSection(rd) {
     <p>This report was built with <code>--merge</code> from ${fmtInt(rd.sources.length)} separate <code>--visualise</code> JSON reports (see the source table above). Figures were combined per field, not simply concatenated:</p>
     <ul>
       <li><strong>Summed</strong> (each source's activity is genuinely independent, so nothing here can double-count): sessions, messages, tokens, commits, pushes, lines written/edited, subagent/workflow counts, transcript files scanned.</li>
-      <li><strong>Recomputed from combined raw data</strong>, not averaged: daily activity is merged date-by-date before active-day coverage, streaks and gaps are recalculated; hour-of-day counts are summed per hour before percentages are recalculated. Averaging the already-derived percentages instead would have been wrong for anything path-dependent, like a streak that only exists because two machines' active days interleave.</li>
+      <li><strong>Recomputed from combined raw data</strong>, not averaged: daily activity is merged date-by-date before active-day coverage, streaks and gaps are recalculated; hour-of-day counts - both the transcript-window series and the full-lifetime typed-prompt series - are summed per hour before percentages are recalculated, and the lifetime prompt span becomes the union of the sources' spans rather than any kind of total. Averaging the already-derived percentages instead would have been wrong for anything path-dependent, like a streak that only exists because two machines' active days interleave.</li>
       <li><strong>Deduplicated</strong>: distinct project/worktree names are unioned rather than summed.</li>
       <li><strong>Approximate</strong>: the count of distinctly-named worktrees created via the EnterWorktree tool is summed across sources, which would overcount if the exact same worktree name was used on more than one machine.</li>
     </ul>`
@@ -296,6 +340,7 @@ export function renderVisualiseHtml(rd) {
     ['Generated', fmtWhen(rd.generatedAt)],
     ['Usage cache since', rd.period.firstSessionDate ? fmtWhen(rd.period.firstSessionDate) : 'n/a'],
     ['Usage cache last computed', esc(rd.period.lastComputedDate ?? 'n/a')],
+    ['Prompts typed (all time)', rd.promptHours ? fmtInt(rd.promptHours.total) : 'n/a'],
     ['Transcripts scanned', fmtInt(rd.scan.filesScanned)],
     [merged ? 'Merged from' : 'Scanned directory', merged ? `${fmtInt(rd.sources.length)} machine(s)` : esc(rd.claudeDir)],
   ];

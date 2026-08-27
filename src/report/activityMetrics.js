@@ -96,7 +96,7 @@ function activeDatesFromRecentDaily(dailyActivity) {
 export const BUSINESS_HOUR_START = 9;
 export const BUSINESS_HOUR_END = 17; // exclusive
 
-export function buildHourOfDay({ claudeWorking, humanPrompts }) {
+export function buildHourOfDay({ claudeWorking, humanPrompts, humanPromptsSource = 'transcripts' }) {
   const hours = Array.from({ length: 24 }, (_, h) => ({
     hour: h,
     claudeWorking: claudeWorking[h] ?? 0,
@@ -114,11 +114,83 @@ export function buildHourOfDay({ claudeWorking, humanPrompts }) {
       pctClaudeWorking: totalClaudeWorking ? (h.claudeWorking / totalClaudeWorking) * 100 : 0,
       pctHumanPrompts: totalHumanPrompts ? (h.humanPrompts / totalHumanPrompts) * 100 : 0,
     })),
+    // 'history' means the prompts series was read from history.jsonl and therefore covers the tool's
+    // whole lifetime rather than the retained transcript window; 'transcripts' is the fallback used
+    // when that file is missing. Consumed only by the report's method/caption prose - the chart itself
+    // draws one prompts series either way.
+    humanPromptsSource,
     totalClaudeWorking,
     totalHumanPrompts,
     hoursWithActivity,
     hourSpreadPct: (hoursWithActivity / 24) * 100,
     businessHoursSharePct: totalClaudeWorking ? (businessHoursClaudeWorking / totalClaudeWorking) * 100 : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Full-lifetime prompt hours (history.jsonl)
+// ---------------------------------------------------------------------------
+// Counts every prompt actually typed, by local hour, over the tool's entire history - built from
+// ~/.claude/history.jsonl, which Claude Code keeps outside the rotating transcript corpus (see
+// scan/promptHistory.js for why that file is trusted for this and what it cannot answer).
+//
+// This feeds two things: the "your prompts" series of the single hour-of-day chart (see
+// buildActivityReportData() below, which prefers it over the transcript-derived count), and the
+// prompt-side KPI cards - busiest hour, late-night total, hours-of-day ever prompted in. Those are
+// counts of human keystrokes only; they are never summed with or averaged against the Claude-working
+// event counts, which measure a different thing.
+export const LATE_NIGHT_START = 22; // inclusive
+export const LATE_NIGHT_END = 6; // exclusive - the band wraps midnight
+
+export function isLateNightHour(hour) {
+  return hour >= LATE_NIGHT_START || hour < LATE_NIGHT_END;
+}
+
+export function buildPromptHours(promptHistory) {
+  if (!promptHistory || !Array.isArray(promptHistory.hours)) return null;
+  const total = promptHistory.hours.reduce((a, b) => a + b, 0);
+  if (total === 0) return null;
+
+  const hours = promptHistory.hours.map((prompts, hour) => ({
+    hour,
+    prompts,
+    pct: (prompts / total) * 100,
+    lateNight: isLateNightHour(hour),
+    businessHours: hour >= BUSINESS_HOUR_START && hour < BUSINESS_HOUR_END,
+  }));
+
+  const peak = hours.reduce((best, h) => (h.prompts > best.prompts ? h : best), hours[0]);
+  const lateNightPrompts = hours.filter((h) => h.lateNight).reduce((a, h) => a + h.prompts, 0);
+  const businessPrompts = hours.filter((h) => h.businessHours).reduce((a, h) => a + h.prompts, 0);
+  const hoursWithActivity = hours.filter((h) => h.prompts > 0).length;
+
+  return {
+    source: 'history.jsonl',
+    hours,
+    total,
+    slashCommands: promptHistory.slashCommands ?? null,
+    distinctSessions: promptHistory.distinctSessions ?? null,
+    distinctProjects: promptHistory.distinctProjects ?? null,
+    firstPromptAt: promptHistory.firstTs !== null ? new Date(promptHistory.firstTs).toISOString() : null,
+    lastPromptAt: promptHistory.lastTs !== null ? new Date(promptHistory.lastTs).toISOString() : null,
+    spanDays:
+      promptHistory.firstTs !== null && promptHistory.lastTs !== null
+        ? Math.max(1, Math.round((promptHistory.lastTs - promptHistory.firstTs) / 86400000))
+        : null,
+    peakHour: peak.hour,
+    peakHourPrompts: peak.prompts,
+    peakHourPct: peak.pct,
+    hoursWithActivity,
+    hourSpreadPct: (hoursWithActivity / 24) * 100,
+    lateNightPrompts,
+    lateNightPct: (lateNightPrompts / total) * 100,
+    businessHoursPrompts: businessPrompts,
+    businessHoursSharePct: (businessPrompts / total) * 100,
+    monthly: promptHistory.monthly ?? [],
+    // Kept as a raw 24-slot array so buildActivityReportData() can hand it straight to
+    // buildHourOfDay() as the chart's prompts series, and report/mergeActivity.js can re-sum across
+    // machines, neither of them having to reverse-engineer counts back out of the percentages above.
+    rawHours: [...promptHistory.hours],
   };
 }
 
@@ -207,7 +279,7 @@ function buildStaleness(statsCache, activityScan) {
   return { lastComputedDate, daysSinceComputed, oldestTranscriptDate, unrecoverableGapDays };
 }
 
-export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache, activityScan }) {
+export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache, activityScan, promptHistory = null }) {
   const lastComputedDate = statsCache?.lastComputedDate ?? null;
   const cachedDaily = statsCache?.dailyActivity ?? [];
   // Only the portion of the live scan's window the cache does not already cover, so the two series
@@ -217,8 +289,28 @@ export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache
   const activeDates = [...activeDatesFromCachedDaily(cachedDaily), ...activeDatesFromRecentDaily(recentDaily)];
   const coverage = activeDates.length ? buildCoverage(activeDates) : null;
 
-  const hourEventTotal = activityScan.hourOfDay.claudeWorking.reduce((a, b) => a + b, 0) + activityScan.hourOfDay.humanPrompts.reduce((a, b) => a + b, 0);
-  const hourOfDay = hourEventTotal > 0 ? buildHourOfDay(activityScan.hourOfDay) : null;
+  // Full-lifetime typed-prompt hours, from history.jsonl rather than transcripts - the only source
+  // that survives transcript rotation for this question. Null when the file is absent/unreadable.
+  const promptHours = buildPromptHours(promptHistory);
+
+  // One hour-of-day series pair, not two charts: the prompts series is taken from history.jsonl when
+  // it is available (same measurement, same units, just not truncated at the ~30-day transcript
+  // rotation), and falls back to the transcript-derived count when it is not. The "Claude working"
+  // series can only ever come from transcripts - history.jsonl holds no record of Claude's side - so
+  // that half is unavoidably limited to what is still on disk. The two are plotted together because
+  // each is scaled as a share of its own total, which is a shape comparison, not a volume one.
+  const lifetimePromptHours = promptHours ? promptHours.rawHours : null;
+  const hourEventTotal =
+    activityScan.hourOfDay.claudeWorking.reduce((a, b) => a + b, 0) +
+    (lifetimePromptHours ?? activityScan.hourOfDay.humanPrompts).reduce((a, b) => a + b, 0);
+  const hourOfDay =
+    hourEventTotal > 0
+      ? buildHourOfDay({
+          claudeWorking: activityScan.hourOfDay.claudeWorking,
+          humanPrompts: lifetimePromptHours ?? activityScan.hourOfDay.humanPrompts,
+          humanPromptsSource: lifetimePromptHours ? 'history' : 'transcripts',
+        })
+      : null;
 
   const tokenSummary = buildTokenSummary(statsCache, activityScan);
   const cost = tokenSummary.byModel.length ? estimateCostByModel(tokenSummary.byModel) : null;
@@ -245,6 +337,7 @@ export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache
     },
     coverage,
     hourOfDay,
+    promptHours,
     dailyActivity: cachedDaily,
     recentDailyActivity: recentDaily,
     sessions: {

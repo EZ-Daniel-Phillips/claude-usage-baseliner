@@ -61,18 +61,34 @@ It is deliberately isolated from `--baseline`/`--compare`:
 - It runs its own transcript walk (`src/scan/activityScanner.js`), independent of the
   usage/cost scanner and its dedupe/cursor state.
 
-Because Claude Code's transcripts rotate after roughly 30 days, `--visualise` combines two sources
+Because Claude Code's transcripts rotate after roughly 30 days, `--visualise` combines three sources
 to cover the tool's whole history, not just what is still on disk:
 
 - **`stats-cache.json`** (Claude Code's own usage cache, at the root of the scanned directory) -
   survives transcript rotation, so it is the source for all-time session/message counts.
+- **`history.jsonl`** (Claude Code's own log of every prompt you have typed, also at the root of the
+  scanned directory) - likewise survives transcript rotation, and is the source for the hour-of-day
+  chart's **"your prompts"** series: when you actually sit down and type, over your whole history. On
+  the corpus this was built against it covered 227 days against the transcripts' 30, and the
+  difference was not cosmetic - 528 prompts fell in the 22:00-01:59 band across the full lifetime
+  versus 13 inside the retained transcript window, so reading that series off transcripts
+  under-reported late-night work by more than an order of magnitude.
 - **A fresh transcript scan** - commits, pushes, worktree creations (both the `EnterWorktree` tool
   and raw `git worktree add`), an estimated line count from Write/Edit tool calls, and (see below)
-  hour-of-day activity, daily activity, and any token/model usage newer than the cache. This part
-  only sees the ~30-day retention window still on disk.
+  hour-of-day *activity* (including Claude working unattended), daily activity, and any token/model
+  usage newer than the cache. This part only sees the ~30-day retention window still on disk.
 
-`stats-cache.json` is optional; a missing file degrades that section of the report rather than
-failing the run.
+Both `stats-cache.json` and `history.jsonl` are optional; a missing file degrades that section of the
+report rather than failing the run.
+
+There is **one** hour-of-day chart, with two series - "Claude working" and "your prompts" - and no
+distinction drawn on it between which file each was read from. The two do reach back different
+distances: `history.jsonl` records only your side of the conversation, so "when do I prompt" is
+answerable for all time, while "when was Claude working" (assistant turns and tool round-trips,
+including unattended overnight runs) can only ever cover the retained transcripts - that older part is
+permanently gone and is left missing rather than estimated. That is a provenance detail, stated once in
+the report's "How to read this page" section, not a second chart or an extra series. Each series is
+scaled as a share of its own total, since one prompt can set off dozens of tool round-trips.
 
 **The lines-written/edited figures are an estimate, not a diff** - they count lines passed to the
 Write/Edit tools, so they cannot see reverts, repeated rewrites of the same lines, or code changed
@@ -96,6 +112,20 @@ sessions only). This is why the two are shown as separate series rather than one
 subagent's opening message is its parent's injected task text, not something you typed, and an
 unattended multi-hour or multi-day run should show up as hours of Claude-working activity, not one
 entry at whatever hour it was started.
+
+**The "your prompts" hour series is read from `history.jsonl`, not from transcripts.** Read off
+transcripts it could never reach past the ~30-day retention window, which materially misrepresents
+anyone who works late: on the corpus this was built against, the retained window held 13 of 528
+lifetime late-night (22:00-01:59) prompts, so the chart looked like a tidy nine-to-five.
+`history.jsonl` - Claude Code's own append-only log of every prompt typed into the prompt box - is not
+rotated with the transcripts, and gave 227 days of coverage against the transcripts' 30. It records
+only your side of the conversation, so it cannot do the same for "Claude working"; that older history
+is permanently gone and is left missing rather than estimated or back-filled from session starts. The
+chart draws both series together anyway, without distinguishing their sources on it - the differing
+reach is documented in the report's method section instead. Slash commands are counted (typing
+`/clear` at 23:40 is still you at the keyboard at 23:40) and disclosed separately in the report, and
+nothing is deduplicated - typing the same prompt twice is two prompts. See
+`src/scan/promptHistory.js`.
 
 **"Your prompts" excludes Claude Code's own system-injected turns, not just tool results.** A second
 audit - after real background/loop usage still showed up as human activity at hours the user knew they
@@ -163,7 +193,10 @@ or averaged:
   are each merged date-by-date (kept separate from each other, since they measure different things -
   see above), then active-day coverage, streaks and gaps are recalculated from the union of active
   dates across both; the "Claude working" and "your prompts" hour-of-day series are each summed per
-  hour across sources before percentages/shares are recalculated.
+  hour across sources before percentages/shares are recalculated. The prompt series only keeps its
+  "covers your whole history" provenance if *every* contributing source had `history.jsonl`; one
+  machine without it makes the combined series a mixture, and the merged report states the weaker
+  claim. Lifetime prompt spans are unioned, never summed.
 - **Deduplicated** - distinct project/worktree names are unioned rather than summed.
 - **Not carried over** - per-source cache-staleness detail (each machine has its own
   `stats-cache.json` on its own recompute schedule) doesn't collapse into one meaningful figure, so a
