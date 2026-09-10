@@ -47,7 +47,8 @@ See `--help` for all options (`--since-last`, `--min-n`, `--bootstrap-samples`, 
 ## `--visualise`: what you did with Claude
 
 A third, independent mode: not "what did it cost", but "what did you actually do" - sessions, an
-activity/hour-of-day pattern, total tokens, commits, worktrees created, and lines written.
+activity pattern by hour of day and by day of week, total tokens, real git commit history, and an
+estimate of lines written.
 
 Every HTML report this tool generates - `--baseline`, `--compare`, `--visualise`, and `--merge` -
 shares one wide, light, large-type visual language meant to be read from across a room (e.g. on a TV
@@ -75,8 +76,10 @@ to cover the tool's whole history, not just what is still on disk:
   difference was not cosmetic - 528 prompts fell in the 22:00-01:59 band across the full lifetime
   versus 13 inside the retained transcript window, so reading that series off transcripts
   under-reported late-night work by more than an order of magnitude.
-- **A fresh transcript scan** - commits, pushes, worktree creations (both the `EnterWorktree` tool
-  and raw `git worktree add`), an estimated line count from Write/Edit tool calls, and (see below)
+- **A read-only git harvest** of the repositories your transcripts show you working in - real commits,
+  real diffs, reaching back as far as the repositories themselves rather than the transcript window.
+  This is the only part of the tool that reads outside `~/.claude`; `--no-git` skips it.
+- **A fresh transcript scan** - an estimated line count from Write/Edit tool calls, and (see below)
   hour-of-day *activity* (including Claude working unattended), daily activity, and any token/model
   usage newer than the cache. This part only sees the ~30-day retention window still on disk.
 
@@ -91,6 +94,64 @@ including unattended overnight runs) can only ever cover the retained transcript
 permanently gone and is left missing rather than estimated. That is a provenance detail, stated once in
 the report's "How to read this page" section, not a second chart or an extra series. Each series is
 scaled as a share of its own total, since one prompt can set off dozens of tool round-trips.
+
+A second chart folds the same two series into the seven days of the week, with a dashed reference line
+at 14.3% - the share each day would hold if work were spread evenly - so a real peak is separable from
+the ordinary lumpiness of seven numbers that must add to 100.
+
+**The weekday/weekend split is reported per day, not as a raw share.** A week has five weekdays and
+two weekend days, so someone who works a Saturday exactly as hard as a Tuesday still shows only 28.6%
+of their activity at the weekend, which reads as "I barely work weekends" and is wrong. The headline
+figure is therefore *weekend intensity*: events per weekend day as a percentage of events per weekday,
+where 100% means a weekend day is indistinguishable from a working day. The raw share is still shown,
+next to the 28.6% it has to be read against. Both denominators count **every** calendar day in the
+window rather than only the active ones - a Saturday you did not work is precisely the signal being
+measured, so dropping it would assume the answer. The two series divide by their own windows, since
+they reach back different distances for the reason above.
+
+Day of week (like hour of day, and unlike the daily-activity series) is bucketed in **local** time.
+Folding a UTC date into a 7-slot histogram would push a real share of late-evening work onto the
+following day - which on a Friday night manufactures weekend activity that never happened.
+
+### Git activity is harvested from real repositories
+
+An earlier version counted `git commit` and `git push` shell invocations found in transcripts and
+presented them as commits and pushes. That was wrong three ways over: it counted *attempts* rather
+than commits that landed (a rejected pre-commit hook, an `--amend`, or a retry after a conflict each
+scored one), it was blind to every commit made outside a Claude Code session, and transcript rotation
+capped it at ~30 days on a page otherwise framed as all-time.
+
+It now runs read-only `git log` / `rev-parse` / `rev-list` queries against the repositories
+themselves. Nothing writes, fetches, checks out, or touches the index; commands are invoked with an
+argument array rather than through a shell, and `--no-optional-locks` keeps git from taking even the
+incidental locks a read command normally would.
+
+Four things make the resulting numbers trustworthy, each of which was a real bug caught against real
+data rather than a hypothetical:
+
+- **Restricted to your own author identity.** One shared repo here held 392 commits carrying a Claude
+  trailer, authored by at least *five different people*. An unfiltered count would have reported the
+  whole team's Claude usage as yours - a worse error than the one this replaces. The identity comes
+  from `git var GIT_AUTHOR_IDENT`, which resolves the way a real commit would; `git config user.email`
+  was empty on the machine this was built against even though every commit carried an author.
+- **Repositories deduplicated by root-commit hash.** A `git worktree` checkout reports its parent's
+  entire history, and a second clone reports the same commits again. Path-based dedupe let the same
+  repository through *three times* here. The root commit's hash is a property of the history, so it is
+  identical in every clone on every machine - which also makes it the right key for `--merge`.
+- **Merge commits excluded from the headline.** A merge carrying the trailer would double-count the
+  branch commits beneath it (15 such merges here). The count is reported separately, not dropped.
+- **Line counts from real diffs**, not from tool-call text - so reverts, rewrites and work done by
+  other means are all accounted for the way git accounts for them.
+
+**Every figure it produces is a floor, never a total**, and is labelled that way everywhere it
+appears. A commit counts as Claude-assisted only if its message carries `Co-Authored-By: Claude` or
+`Generated with [Claude Code]`. Commits from a session that never emitted a marker, or from before you
+adopted the convention, are invisible and always will be.
+
+One limitation survives: repository **discovery** still depends on the transcript window, since the
+tool has to have seen you working somewhere to know the repo exists. The **history** read out of each
+discovered repo is complete. Pass `--git-repo <path>` (repeatable) to include a repo you have not
+opened in Claude Code recently.
 
 **The lines-written/edited figures are an estimate, not a diff** - they count lines passed to the
 Write/Edit tools, so they cannot see reverts, repeated rewrites of the same lines, or code changed
@@ -189,16 +250,25 @@ Fields are combined by whichever rule is actually correct for what they measure,
 or averaged:
 
 - **Summed** - each source's activity is genuinely independent, so nothing here can double-count:
-  sessions, messages, tokens, commits, pushes, lines written/edited, subagent/workflow counts,
+  sessions, messages, tokens, prompts typed, lines written/edited, subagent/workflow counts,
   transcript files scanned.
 - **Recomputed from combined raw data, not averaged** - the cached and recent daily-activity series
   are each merged date-by-date (kept separate from each other, since they measure different things -
   see above), then active-day coverage, streaks and gaps are recalculated from the union of active
-  dates across both; the "Claude working" and "your prompts" hour-of-day series are each summed per
-  hour across sources before percentages/shares are recalculated. The prompt series only keeps its
+  dates across both; the "Claude working" and "your prompts" series are each summed per slot - both
+  the 24 hour-of-day slots and the 7 day-of-week ones - across sources before percentages/shares are
+  recalculated. The weekday/weekend per-day denominators are recomputed from the *union* of the
+  sources' spans rather than summed across them, since summing would double-count every calendar day
+  two machines were both active on; a union span also credits each machine with days it may not have
+  been in use for, so merged per-day rates are a floor rather than an exact figure, and machines in
+  different timezones each bucket their own events locally before being combined. The prompt series only keeps its
   "covers your whole history" provenance if *every* contributing source had `history.jsonl`; one
   machine without it makes the combined series a mixture, and the merged report states the weaker
   claim. Lifetime prompt spans are unioned, never summed.
+- **Combined by repository identity, not summed** - git figures are keyed on each repository's
+  root-commit hash, identical in every clone on every machine. Two machines holding the same repo
+  contribute it once, at the larger of the two views: a commit is a fact about the repository, not
+  about the machine that read it. Summing would double every git figure.
 - **Deduplicated** - distinct project/worktree names are unioned rather than summed.
 - **Not carried over** - per-source cache-staleness detail (each machine has its own
   `stats-cache.json` on its own recompute schedule) doesn't collapse into one meaningful figure, so a

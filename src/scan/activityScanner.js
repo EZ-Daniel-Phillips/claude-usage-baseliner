@@ -153,6 +153,21 @@ export async function scanActivity(claudeDir) {
   // contrast between "Claude was working" and "you typed something" instead of conflating them.
   const hourClaudeWorking = new Array(24).fill(0);
   const hourHumanPrompts = new Array(24).fill(0);
+
+  // Same two event classes, bucketed by LOCAL day of week (getDay(), 0 = Sunday) rather than local
+  // hour. Local, not UTC, for the same reason scan/promptHistory.js is: folding a UTC date into a
+  // 7-slot histogram pushes late-evening local work into the next weekday, which on a Friday night
+  // manufactures weekend activity that never happened. This is a second bucketing of the same events,
+  // not a second pass - the hour and weekday histograms always sum to the same totals.
+  const dowClaudeWorking = new Array(7).fill(0);
+  const dowHumanPrompts = new Array(7).fill(0);
+
+  // Every distinct working directory seen on a transcript line. This is the discovery input for
+  // scan/gitHarvest.js: an exact absolute path, unlike the sanitized project directory names under
+  // projects/, which replace path separators with hyphens and cannot be decoded back unambiguously
+  // when a directory name legitimately contains one. Collected here rather than in a second walk
+  // because this pass already reads every line of every transcript.
+  const cwds = new Set();
   const dailyEvents = new Map(); // UTC date -> { claudeEvents, humanPrompts }
   const dailySessionsStarted = new Map(); // UTC date -> Set<sessionId>, main tier only
 
@@ -201,6 +216,8 @@ export async function scanActivity(claudeDir) {
       }
       if (session) session.messageLines += 1;
 
+      if (typeof obj.cwd === 'string' && obj.cwd) cwds.add(obj.cwd);
+
       if (obj?.attachment?.type === 'invoked_skills' && Array.isArray(obj.attachment.skills)) {
         skillInvocations += obj.attachment.skills.length;
       }
@@ -208,22 +225,27 @@ export async function scanActivity(claudeDir) {
       // "Claude working" vs "human prompt" classification - see the file header for the definitions
       // and why hourCounts/dailyActivity from stats-cache.json cannot be used for this instead.
       if (tsValid) {
-        const localHour = new Date(ts).getHours();
+        const when = new Date(ts);
+        const localHour = when.getHours();
+        const localDow = when.getDay();
         const date = utcDate(ts);
         if (obj.type === 'assistant') {
           hourClaudeWorking[localHour] += 1;
+          dowClaudeWorking[localDow] += 1;
           bumpDaily(dailyEvents, date, 'claudeEvents');
         } else if (obj.type === 'user') {
           const userContent = obj.message?.content;
           const isToolResult = Array.isArray(userContent) && userContent.some((b) => b?.type === 'tool_result');
           if (isToolResult) {
             hourClaudeWorking[localHour] += 1;
+            dowClaudeWorking[localDow] += 1;
             bumpDaily(dailyEvents, date, 'claudeEvents');
           } else if (fileDesc.tier === 'main' && !isSyntheticUserLine(obj)) {
             // A subagent/workflow-agent's opening "user" line is its parent's injected task text, not
             // something a human typed - restricting to 'main' excludes that by construction. See
             // isSyntheticUserLine() for the other system-generated cases this also excludes.
             hourHumanPrompts[localHour] += 1;
+            dowHumanPrompts[localDow] += 1;
             bumpDaily(dailyEvents, date, 'humanPrompts');
           }
         }
@@ -326,6 +348,11 @@ export async function scanActivity(claudeDir) {
       claudeWorking: hourClaudeWorking,
       humanPrompts: hourHumanPrompts,
     },
+    dayOfWeek: {
+      claudeWorking: dowClaudeWorking,
+      humanPrompts: dowHumanPrompts,
+    },
+    cwds: [...cwds],
     // One row per UTC date actually seen in transcripts still on disk - i.e. only the retained
     // window, never a substitute for stats-cache.json's longer (but frozen) history.
     dailyActivity: [...dailyEvents.entries()]

@@ -4,7 +4,7 @@ import { readLinesFrom } from './jsonlReader.js';
 import { verbose } from '../util/log.js';
 
 // Reads ~/.claude/history.jsonl - Claude Code's own log of every prompt you have actually typed into
-// the prompt box - and buckets it by local hour of day.
+// the prompt box - and buckets it by local hour of day and local day of week.
 //
 // Why this file exists at all, when scan/activityScanner.js already builds an hour-of-day histogram:
 // that one is computed from transcripts, and transcripts rotate after roughly 30 days (see
@@ -40,6 +40,14 @@ export const HISTORY_FILENAME = 'history.jsonl';
 
 const LATE_HOUR_NOTE = 'local hour, DST-correct per entry (each timestamp is converted individually)';
 
+// Day-of-week is bucketed in LOCAL time too (getDay(), 0 = Sunday), matching the local-hour bucketing
+// above rather than the UTC calendar-date bucketing scan/activityScanner.js uses for daily activity.
+// That difference is deliberate: a prompt typed at 23:40 on a Friday is a Friday-night prompt no
+// matter what UTC calls it, and bucketing it by UTC date would move a meaningful share of evening
+// work onto the following day - which for a Friday means inventing weekend activity that never
+// happened. Daily activity does not have that problem because it is only ever read as a per-date
+// series, never folded into a 7-slot weekday histogram where the boundary error concentrates.
+
 // Slash commands are typed input like any other, but are worth counting separately: they are cheap
 // keystrokes rather than work being requested, so a reader comparing this total against a message or
 // request count elsewhere in the report needs to know how many of these are in it.
@@ -55,6 +63,7 @@ export async function readPromptHistory(claudeDir) {
   }
 
   const hours = new Array(24).fill(0);
+  const dow = new Array(7).fill(0); // local day of week, 0 = Sunday
   const monthly = new Map();
   const sessions = new Set();
   const projects = new Set();
@@ -87,6 +96,7 @@ export async function readPromptHistory(claudeDir) {
 
       entries += 1;
       hours[hour] += 1;
+      dow[when.getDay()] += 1;
       if (firstTs === null || ts < firstTs) firstTs = ts;
       if (lastTs === null || ts > lastTs) lastTs = ts;
       // UTC month key, matching the UTC date-bucketing activityScanner.js uses for daily activity -
@@ -119,6 +129,7 @@ export async function readPromptHistory(claudeDir) {
     firstTs,
     lastTs,
     hours,
+    dow,
     monthly: [...monthly.entries()]
       .map(([month, prompts]) => ({ month, prompts }))
       .sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0)),

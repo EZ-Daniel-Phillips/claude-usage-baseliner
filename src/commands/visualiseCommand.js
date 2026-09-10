@@ -4,6 +4,7 @@ import readline from 'node:readline/promises';
 import { readStatsCache } from '../scan/rootStats.js';
 import { scanActivity } from '../scan/activityScanner.js';
 import { readPromptHistory } from '../scan/promptHistory.js';
+import { harvestGitActivity } from '../scan/gitHarvest.js';
 import { buildActivityReportData } from '../report/activityMetrics.js';
 import { writeJsonReport } from '../report/json.js';
 import { renderVisualiseHtml } from '../report/visualiseHtml.js';
@@ -37,7 +38,7 @@ async function confirmStaleCache(daysStale, lastComputedDate, maxCacheAgeDays) {
 // not "what did it cost". Deliberately never touches state.json (state/cursor.js) or the
 // baselines/compares directories - see report/activityMetrics.js and scan/activityScanner.js for why
 // each data source was chosen to be independently readable without perturbing those modes.
-export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleCache = false }) {
+export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleCache = false, harvestGit = true, extraRepos = [] }) {
   info(`Reading usage cache under ${claudeDir} ...`);
   const statsCache = readStatsCache(claudeDir);
 
@@ -63,7 +64,7 @@ export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleC
     }
   }
 
-  info(`Scanning transcripts under ${claudeDir} for activity (commits, worktrees, code written) ...`);
+  info(`Scanning transcripts under ${claudeDir} for activity (sessions, tools, code written) ...`);
   const activityScan = await scanActivity(claudeDir);
 
   // The hour-of-day chart's "your prompts" series comes from here rather than from the transcript scan
@@ -73,6 +74,18 @@ export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleC
   info(`Reading typed-prompt history (history.jsonl) for full-history hour-of-day coverage ...`);
   const promptHistory = await readPromptHistory(claudeDir);
 
+  // The only step that reads anything outside ~/.claude. Strictly read-only git queries against the
+  // repositories the transcripts say you worked in - see scan/gitHarvest.js for why this replaced the
+  // transcript-mined commit counts, and what it can and cannot see. Opt out with --no-git.
+  let gitHarvest = null;
+  if (harvestGit) {
+    info(`Harvesting real git history from the repositories seen in transcripts (read-only) ...`);
+    gitHarvest = harvestGitActivity({ cwds: activityScan.cwds ?? [], extraRepos });
+    if (!gitHarvest.available) {
+      warn(`Git harvest unavailable: ${gitHarvest.reason}. The report will say so rather than estimating.`);
+    }
+  }
+
   const id = `visualise-${compactIsoTimestamp()}`;
   const reportData = buildActivityReportData({
     claudeDir,
@@ -81,6 +94,7 @@ export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleC
     statsCache,
     activityScan,
     promptHistory,
+    gitHarvest,
   });
 
   const visualiseDir = getVisualiseDir();
@@ -96,7 +110,10 @@ export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleC
       (statsCache ? `, ${(statsCache.totalSessions ?? 0).toLocaleString('en-US')} sessions on record since ${statsCache.firstSessionDate}` : ', no usage cache found') +
       (promptHistory
         ? `, ${promptHistory.entries.toLocaleString('en-US')} typed prompts read from history.jsonl (full lifetime)`
-        : ', no history.jsonl found (lifetime prompt hours unavailable)')
+        : ', no history.jsonl found (lifetime prompt hours unavailable)') +
+      (reportData.gitActivity?.available
+        ? `, ${reportData.gitActivity.claudeCommits.toLocaleString('en-US')} Claude-attributed commits across ${reportData.gitActivity.reposWithClaudeCommits} repo(s)`
+        : '')
   );
   info(`  JSON: ${jsonPath}`);
   info(`  HTML: ${htmlPath}`);

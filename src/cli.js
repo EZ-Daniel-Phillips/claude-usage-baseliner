@@ -47,6 +47,15 @@ Options:
   --max-cache-age <days>  With --visualise, how many days stale stats-cache.json may be before the
                           run prompts (interactive) or refuses (non-interactive) to continue. Run
                           /stats in Claude Code to refresh it. Default: 2.
+  --no-git                With --visualise, skip the git-history harvest. The harvest is the only
+                          part of this tool that reads outside ~/.claude; it runs read-only git log
+                          and rev-parse queries against the repositories your transcripts show you
+                          worked in, to count commits Claude actually helped land. Pass this to keep
+                          the run entirely within ~/.claude.
+  --git-repo <path>       With --visualise, harvest this repository too (repeatable). Discovery is
+                          otherwise limited to working directories recorded in transcripts still on
+                          disk, so a repo you have not touched in ~30 days will not be found on its
+                          own - name it here to include it.
   --allow-stale-cache     With --visualise, skip the stale-cache prompt/check entirely and proceed
                           no matter how old stats-cache.json is.
   --claude-dir <path>     Directory to scan (default: ~/.claude).
@@ -74,6 +83,8 @@ export async function main(argv) {
         'bootstrap-samples': { type: 'string' },
         'max-cache-age': { type: 'string' },
         'allow-stale-cache': { type: 'boolean' },
+        'no-git': { type: 'boolean' },
+        'git-repo': { type: 'string', multiple: true },
         quiet: { type: 'boolean' },
         verbose: { type: 'boolean' },
         help: { type: 'boolean' },
