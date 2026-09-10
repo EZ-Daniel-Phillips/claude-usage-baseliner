@@ -94,7 +94,10 @@ export function buildGitActivity(harvest) {
     markers: harvest.markers ?? [],
     // Count only - the addresses themselves stay out of the report shape that gets rendered. See the
     // header note; gitHarvest keeps the raw list for --merge, which reads it from the scan, not here.
-    identityCount: (harvest.authorEmails ?? []).length,
+    identityCount: (harvest.identityKeys ?? harvest.authorEmails ?? []).length,
+    // Hashed identities, so --merge can tell "one person on two machines" from "two people" without
+    // any report file carrying an email address.
+    identityKeys: harvest.identityKeys ?? [],
     reposDiscovered: harvest.reposDiscovered ?? repos.length,
     reposHarvested: repos.length,
     reposWithClaudeCommits: contributing.length,
@@ -133,11 +136,21 @@ export function buildGitActivity(harvest) {
       // Linked worktrees and second clones that were folded into this row.
       aliasPaths: r.aliasPaths ?? [],
       rootCommitKey: r.rootCommitKey ?? null,
+      // The individual root commits, not only the joined key. --merge matches on any SHARED root
+      // rather than on set equality, because `rev-list --all` only sees the refs a given machine has
+      // fetched - two machines can compute different joined keys for one repository.
+      rootCommits: r.rootCommits ?? [],
       claudeCommits: r.claudeCommits,
       authoredCommits: r.authoredCommits,
       claudeSharePct: r.authoredCommits ? (r.claudeCommits / r.authoredCommits) * 100 : null,
       insertions: r.insertions,
       deletions: r.deletions,
+      // Carried per repo so a merge can re-derive the totals from the DEDUPLICATED repo list. These
+      // were previously summed per source, which doubled them whenever two machines held the same
+      // repository - the totals above deduplicated correctly while these three did not.
+      filesChanged: r.filesChanged ?? 0,
+      binaryFiles: r.binaryFiles ?? 0,
+      claudeMerges: r.claudeMerges ?? 0,
       firstClaudeCommitAt: r.firstClaudeCommitAt,
       lastClaudeCommitAt: r.lastClaudeCommitAt,
     })),
@@ -163,86 +176,134 @@ export function mergeGitActivity(list) {
     return { available: false, reason: anyReason ?? 'no source reported git activity', reposDiscovered: 0, skipped: [] };
   }
 
-  const byRepo = new Map();
+  // Every key that could identify this repository. A repo is the same repo as another if they share
+  // ANY of these - not if some single canonical key happens to agree:
+  //   - the remote, which is the most stable signal across machines and survives shallow and partial
+  //     clones that would change which root commits are locally visible;
+  //   - any individual root commit. Set equality is NOT safe here: `rev-list --max-parents=0 --all`
+  //     only reports roots reachable from refs the machine has actually fetched, and a repo with more
+  //     than one root (a subtree merge - one of the repos this was developed against has two) will
+  //     yield different sets on two machines with different refs, which would defeat the dedupe and
+  //     double every figure derived from it.
+  const keysFor = (r) => {
+    const keys = [];
+    if (r.remote) keys.push(`remote:${r.remote}`);
+    for (const root of r.rootCommits ?? []) keys.push(`root:${root}`);
+    if (!keys.length && r.rootCommitKey) keys.push(`rootkey:${r.rootCommitKey}`);
+    if (!keys.length && r.path) keys.push(`path:${r.path}`);
+    return keys;
+  };
+
+  // Same-repo figures are a property of the repository, so the larger view wins rather than the sum:
+  // whichever machine had more refs fetched simply saw more of the same history.
+  const foldInto = (cur, r) => {
+    cur.claudeCommits = Math.max(cur.claudeCommits ?? 0, r.claudeCommits ?? 0);
+    cur.authoredCommits = Math.max(cur.authoredCommits ?? 0, r.authoredCommits ?? 0);
+    cur.insertions = Math.max(cur.insertions ?? 0, r.insertions ?? 0);
+    cur.deletions = Math.max(cur.deletions ?? 0, r.deletions ?? 0);
+    cur.filesChanged = Math.max(cur.filesChanged ?? 0, r.filesChanged ?? 0);
+    cur.binaryFiles = Math.max(cur.binaryFiles ?? 0, r.binaryFiles ?? 0);
+    cur.claudeMerges = Math.max(cur.claudeMerges ?? 0, r.claudeMerges ?? 0);
+    cur.claudeSharePct = cur.authoredCommits ? (cur.claudeCommits / cur.authoredCommits) * 100 : null;
+    cur.fullName = cur.fullName ?? r.fullName ?? null;
+    cur.remote = cur.remote ?? r.remote ?? null;
+    if (!cur.fullName && r.name && r.name.length > (cur.name ?? '').length) cur.name = r.name;
+    cur.rootCommits = [...new Set([...(cur.rootCommits ?? []), ...(r.rootCommits ?? [])])];
+    // Paths are machine-specific, so every checkout of this repo on any machine is true at once.
+    cur.aliasPaths = [...new Set([...(cur.aliasPaths ?? []), ...(r.aliasPaths ?? []), r.path].filter(Boolean))].filter(
+      (ap) => ap !== cur.path
+    );
+    if (r.firstClaudeCommitAt && (!cur.firstClaudeCommitAt || r.firstClaudeCommitAt < cur.firstClaudeCommitAt)) {
+      cur.firstClaudeCommitAt = r.firstClaudeCommitAt;
+    }
+    if (r.lastClaudeCommitAt && (!cur.lastClaudeCommitAt || r.lastClaudeCommitAt > cur.lastClaudeCommitAt)) {
+      cur.lastClaudeCommitAt = r.lastClaudeCommitAt;
+    }
+    return cur;
+  };
+
+  const byKey = new Map(); // any key -> the entry it belongs to
+  const entries = new Set();
   const skipped = [];
   const markers = new Set();
-  let identityCount = 0;
+  const identityKeys = new Set();
+  let identityCountFallback = 0;
   let reposDiscovered = 0;
 
   for (const rd of withGit) {
     const g = rd.gitActivity;
     for (const m of g.markers ?? []) markers.add(m);
-    identityCount += g.identityCount ?? 0;
+    for (const k of g.identityKeys ?? []) identityKeys.add(k);
+    if (!(g.identityKeys ?? []).length) identityCountFallback = Math.max(identityCountFallback, g.identityCount ?? 0);
     reposDiscovered += g.reposDiscovered ?? 0;
-    for (const s of g.skipped ?? []) skipped.push(s);
+    for (const sk of g.skipped ?? []) skipped.push(sk);
 
     for (const r of g.repos ?? []) {
-      // Falls back to the path when a root-commit key is missing (an empty repo, or a source report
-      // written before this field existed) - a path is still better than merging unrelated repos.
-      const key = r.rootCommitKey || `path:${r.path}`;
-      const cur = byRepo.get(key);
-      if (!cur) {
-        byRepo.set(key, { ...r, aliasPaths: [...(r.aliasPaths ?? [])], daily: [] });
-        continue;
+      const keys = keysFor(r);
+      // A new repo can match several existing entries at once (machine A knew it by remote, machine B
+      // by a root commit, and this one carries both) - those entries were the same repository all
+      // along and are collapsed together here rather than left as duplicates.
+      const matched = [...new Set(keys.map((k) => byKey.get(k)).filter(Boolean))];
+      let entry;
+      if (!matched.length) {
+        entry = { ...r, rootCommits: [...(r.rootCommits ?? [])], aliasPaths: [...(r.aliasPaths ?? [])] };
+        entries.add(entry);
+      } else {
+        entry = matched[0];
+        for (const other of matched.slice(1)) {
+          foldInto(entry, other);
+          entries.delete(other);
+          for (const [k, v] of byKey) if (v === other) byKey.set(k, entry);
+        }
+        foldInto(entry, r);
       }
-      // Identity fields: keep the most specific one any source managed to resolve. A machine whose
-      // clone has no remote configured still contributes its counts, but should not overwrite a
-      // canonical "owner/repo" that another machine did resolve.
-      cur.fullName = cur.fullName ?? r.fullName ?? null;
-      cur.remote = cur.remote ?? r.remote ?? null;
-      if (!cur.fullName && r.name && r.name.length > (cur.name ?? '').length) cur.name = r.name;
-      // Alias paths are machine-specific, so they union rather than replace - the same repo can sit
-      // at a different path on each machine, and all of them are true.
-      cur.aliasPaths = [...new Set([...(cur.aliasPaths ?? []), ...(r.aliasPaths ?? []), r.path].filter(Boolean))]
-        .filter((ap) => ap !== cur.path);
-      // Same repository seen from two machines. Commit counts are a property of the repo, so take the
-      // larger view rather than adding them - whichever machine had more refs fetched saw more.
-      cur.claudeCommits = Math.max(cur.claudeCommits ?? 0, r.claudeCommits ?? 0);
-      cur.authoredCommits = Math.max(cur.authoredCommits ?? 0, r.authoredCommits ?? 0);
-      cur.insertions = Math.max(cur.insertions ?? 0, r.insertions ?? 0);
-      cur.deletions = Math.max(cur.deletions ?? 0, r.deletions ?? 0);
-      cur.claudeSharePct = cur.authoredCommits ? (cur.claudeCommits / cur.authoredCommits) * 100 : null;
-      if (r.firstClaudeCommitAt && (!cur.firstClaudeCommitAt || r.firstClaudeCommitAt < cur.firstClaudeCommitAt)) {
-        cur.firstClaudeCommitAt = r.firstClaudeCommitAt;
-      }
-      if (r.lastClaudeCommitAt && (!cur.lastClaudeCommitAt || r.lastClaudeCommitAt > cur.lastClaudeCommitAt)) {
-        cur.lastClaudeCommitAt = r.lastClaudeCommitAt;
-      }
+      for (const k of [...keys, ...keysFor(entry)]) byKey.set(k, entry);
     }
   }
 
-  // Report JSON carries only the combined daily series per source, not a per-repo breakdown, so the
-  // merged series is folded date-by-date with the same max-wins rule the totals above use.
-  const daily = mergeDailyMaxByDate(withGit.map((rd) => rd.gitActivity.daily ?? []));
-  const repos = [...byRepo.values()].sort((a, b) => (b.claudeCommits ?? 0) - (a.claudeCommits ?? 0));
+  const repos = [...entries].sort((a, b) => (b.claudeCommits ?? 0) - (a.claudeCommits ?? 0));
+  const sum = (f) => repos.reduce((a, r) => a + (f(r) ?? 0), 0);
 
-  const claudeCommits = repos.reduce((a, r) => a + (r.claudeCommits ?? 0), 0);
-  const authoredCommits = repos.reduce((a, r) => a + (r.authoredCommits ?? 0), 0);
-  const insertions = repos.reduce((a, r) => a + (r.insertions ?? 0), 0);
-  const deletions = repos.reduce((a, r) => a + (r.deletions ?? 0), 0);
+  const claudeCommits = sum((r) => r.claudeCommits);
+  const authoredCommits = sum((r) => r.authoredCommits);
+  const insertions = sum((r) => r.insertions);
+  const deletions = sum((r) => r.deletions);
   const firsts = repos.map((r) => r.firstClaudeCommitAt).filter(Boolean).sort();
   const lasts = repos.map((r) => r.lastClaudeCommitAt).filter(Boolean).sort();
   const firstClaudeCommitAt = firsts[0] ?? null;
   const lastClaudeCommitAt = lasts[lasts.length - 1] ?? null;
 
+  // Report JSON carries only a combined daily series per source, not a per-repo breakdown, so the
+  // merged series is folded date-by-date, max-wins. This is the one figure here that stays an
+  // approximation: two machines holding entirely different repos that both saw commits on the same
+  // date will report the larger of the two rather than their sum. It errs downward, which is the
+  // right direction for a number already presented as a floor, and the per-repo totals above - which
+  // are exact - are what every headline is built from.
+  const daily = mergeDailyMaxByDate(withGit.map((rd) => rd.gitActivity.daily ?? []));
+
   return {
     available: true,
     gitVersion: withGit.map((rd) => rd.gitActivity.gitVersion).find(Boolean) ?? null,
     markers: [...markers],
-    identityCount,
+    // Hashed, so the same person on two machines counts once instead of twice.
+    identityCount: identityKeys.size || identityCountFallback,
+    identityKeys: [...identityKeys],
     reposDiscovered,
     reposHarvested: repos.length,
     reposWithClaudeCommits: repos.filter(isInteresting).length,
     skipped,
     claudeCommits,
-    claudeMergesExcluded: withGit.reduce((a, rd) => a + (rd.gitActivity.claudeMergesExcluded ?? 0), 0),
+    // All three are now derived from the deduplicated repo list, not summed per source. Summing them
+    // doubled each one whenever two machines held the same repository, while the commit and line
+    // totals beside them deduplicated correctly - a silent inconsistency inside one section.
+    claudeMergesExcluded: sum((r) => r.claudeMerges),
+    filesChanged: sum((r) => r.filesChanged),
+    binaryFiles: sum((r) => r.binaryFiles),
     authoredCommits,
     claudeSharePct: authoredCommits ? (claudeCommits / authoredCommits) * 100 : null,
     insertions,
     deletions,
     netLines: insertions - deletions,
-    filesChanged: withGit.reduce((a, rd) => a + (rd.gitActivity.filesChanged ?? 0), 0),
-    binaryFiles: withGit.reduce((a, rd) => a + (rd.gitActivity.binaryFiles ?? 0), 0),
     firstClaudeCommitAt,
     lastClaudeCommitAt,
     spanDays: daysBetweenIso(firstClaudeCommitAt, lastClaudeCommitAt),

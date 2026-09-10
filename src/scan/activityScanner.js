@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import { walkTranscriptFiles } from './walker.js';
-import { readLinesFrom } from './jsonlReader.js';
+import { readLines } from './jsonlReader.js';
 import { verbose } from '../util/log.js';
+import { startProgress } from '../util/progress.js';
 
 // Independent, read-only pass over the same transcript corpus scanner.js reads, but for a different
 // question: not "what did requests cost", but "what did you actually do" - commits, worktrees, lines
@@ -177,13 +178,17 @@ export async function scanActivity(claudeDir) {
   // lines with no usage at all, same exclusions recordParser.js applies for --baseline/--compare.
   const tokenDedup = new Map(); // messageId -> { date, model, tokens, total }
 
-  for (const fileDesc of walkTranscriptFiles(claudeDir)) {
+  const allFiles = [...walkTranscriptFiles(claudeDir)];
+  const progress = startProgress('Scanning transcripts', allFiles.length);
+
+  for (const fileDesc of allFiles) {
     try {
       fs.statSync(fileDesc.filePath);
     } catch {
       continue; // file disappeared between walk and stat - skip
     }
 
+    progress.tick(1, fileDesc.project);
     projects.add(fileDesc.project);
     const wtMatch = WORKTREE_PROJECT_RE.exec(fileDesc.project);
     if (wtMatch) worktreeProjects.set(wtMatch[1], fileDesc.project);
@@ -196,7 +201,7 @@ export async function scanActivity(claudeDir) {
 
     const session = fileDesc.tier === 'main' ? getOrCreateSession(sessions, fileDesc.sessionId, fileDesc.project) : null;
 
-    for await (const { line } of readLinesFrom(fileDesc.filePath, 0)) {
+    for await (const line of readLines(fileDesc.filePath)) {
       let obj;
       try {
         obj = JSON.parse(line);
@@ -312,6 +317,8 @@ export async function scanActivity(claudeDir) {
     filesScanned += 1;
     verbose(`[activity] ${fileDesc.tier.padEnd(14)} ${fileDesc.relPath}`);
   }
+
+  progress.done();
 
   return {
     filesScanned,

@@ -113,6 +113,36 @@ Day of week (like hour of day, and unlike the daily-activity series) is bucketed
 Folding a UTC date into a 7-slot histogram would push a real share of late-evening work onto the
 following day - which on a Friday night manufactures weekend activity that never happened.
 
+### Pricing and performance
+
+**The price table is frozen and versioned** (currently `2026-09-10`). A baseline and a compare must be
+priced with the *same* table, or the delta between them measures Anthropic's pricing changes rather
+than your own efficiency — so changing a rate means bumping `PRICE_TABLE_VERSION` and re-baselining.
+The table carries a per-model cache-read multiplier because it is not a single constant: most models
+read cache at 0.1x their input rate, but Claude Fable 5.1 and Mythos 5.1 read at **0.025x**. Cache
+reads dominate every token count in this corpus, so treating that 4x difference as 0.1x would
+materially overstate their cost. Models missing from the table fall back to the Opus tier, and the
+report now discloses the *tokens* affected rather than the request count — rows sourced from Claude
+Code's own token cache carry no request count, so an unpriced model could contribute billions of
+tokens while still reporting "0 unpriced requests".
+
+**Scan performance.** On a 1.4 GB / 483k-line corpus with five repositories, a full `--visualise` run
+went from ~107s to ~37s:
+
+- *Transcript reading (~34s → ~19s).* The JSONL reader now reads in binary and decodes one line at a
+  time. It previously let the stream decode to UTF-8 and then called `Buffer.byteLength()` on every
+  line to recover the byte offset the resume cursor needs — encoding the whole corpus a second time —
+  and rescanned a growing string per line rather than per chunk.
+- *Git harvest (~45s → ~17s).* Git process spawn is the dominant cost on Windows (~124ms each), and
+  discovery was resolving five properties of every candidate directory *before* deduplicating: ~195
+  spawns to describe five repositories. Discovery is now two phases — one cheap spawn per candidate to
+  identify the repository, then the expensive identity work only for the survivors — with both phases
+  and the per-repository history reads running concurrently.
+
+**Progress reporting.** Both scans print a single in-place progress line to stderr. It draws only when
+stderr is a TTY, stays silent under `--quiet`, throttles to ~10 redraws a second, truncates to the
+terminal width, and clears its own line when done — so redirected output and CI logs are unaffected.
+
 ### Git activity is harvested from real repositories
 
 An earlier version counted `git commit` and `git push` shell invocations found in transcripts and

@@ -759,13 +759,21 @@ function methodExplainer(reportData) {
     <p>A baseline covers everything on disk (often a month); a compare covers only what happened since. Comparing those totals directly would just tell you which window was longer. So every headline figure is a <strong>rate</strong> &mdash; per request, per session, per active hour &mdash; which stays comparable no matter how long each window ran.</p>
 
     <h3>How the cost estimate is built</h3>
-    <p>Each token is priced by its class and the model that produced it, using published Claude API list rates: cache reads at <strong>${m.cacheReadMultiplier}&times;</strong> the model&rsquo;s input rate, output at that model&rsquo;s own output rate, and cache writes by how long they were held &mdash; <strong>${m.cacheWrite5mMultiplier}&times;</strong> for a 5-minute cache and <strong>${m.cacheWrite1hMultiplier}&times;</strong> for a 1-hour one. The price table is frozen (version <code>${esc(m.priceTableVersion)}</code>) and identical on both sides of every comparison &mdash; otherwise a price change by Anthropic would show up as your efficiency win.</p>
+    <p>Each token is priced by its class and the model that produced it, using published Claude API list rates: cache reads at <strong>${m.cacheReadMultiplier}&times;</strong> the model&rsquo;s input rate${
+      (m.cacheReadMultiplierExceptions ?? []).length
+        ? ` (except ${m.cacheReadMultiplierExceptions.map((x) => `<code>${esc(x.model)}</code> at <strong>${x.cacheReadMultiplier}&times;</strong>`).join(' and ')})`
+        : ''
+    }, output at that model&rsquo;s own output rate, and cache writes by how long they were held &mdash; <strong>${m.cacheWrite5mMultiplier}&times;</strong> for a 5-minute cache and <strong>${m.cacheWrite1hMultiplier}&times;</strong> for a 1-hour one. The price table is frozen (version <code>${esc(m.priceTableVersion)}</code>) and identical on both sides of every comparison &mdash; otherwise a price change by Anthropic would show up as your efficiency win.</p>
     ${
       ttlMode === 'flat'
         ? `<p class="callout callout-info"><strong>Cache writes here are costed at the flat ${m.cacheWriteFallbackMultiplier}&times; rate.</strong> The 5-minute/1-hour breakdown is missing from at least one side of this comparison, and pricing one side exactly while the other is estimated would show up as a cost change that is really just a change in measurement. Both sides therefore use the cheaper flat rate, which understates true spend a little &mdash; on this corpus, by roughly 2.5%. Re-run <code>--baseline</code> to capture the breakdown and both sides will price exactly.</p>`
         : `<p class="callout callout-ok"><strong>Cache writes are costed exactly.</strong> Both sides of this comparison record the 5-minute/1-hour split, so 1-hour cache writes are billed at ${m.cacheWrite1hMultiplier}&times; rather than assumed to be the cheaper 5-minute kind.</p>`
     }
-    <p class="callout callout-warn"><strong>This is an estimate, not your bill.</strong> Claude Code transcripts contain no billing signal, and on a subscription plan you are not charged per token at all. Treat the dollar figures as a consistently-weighted way to compare two periods against each other, not as an amount anybody invoiced you.${reportData.cost.unpricedRequests ? ` ${fmtInt(reportData.cost.unpricedRequests)} request(s) ran on a model with no entry in the price table and were costed at the Opus tier.` : ''}</p>
+    <p class="callout callout-warn"><strong>This is an estimate, not your bill.</strong> Claude Code transcripts contain no billing signal, and on a subscription plan you are not charged per token at all. Treat the dollar figures as a consistently-weighted way to compare two periods against each other, not as an amount anybody invoiced you.${
+      reportData.cost.unpricedTokens || reportData.cost.unpricedRequests
+        ? ` ${fmtInt(reportData.cost.unpricedTokens ?? 0)} token(s)${reportData.cost.unpricedRequests ? ` across ${fmtInt(reportData.cost.unpricedRequests)} request(s)` : ''} ran on a model with no entry in the price table (${(reportData.cost.unpricedModels ?? []).map((mm) => `<code>${esc(mm)}</code>`).join(', ')}) and were costed at the Opus tier, which may over- or under-state their true rate.`
+        : ''
+    }</p>
 
     <h3>Which numbers are exact, and which use a sample</h3>
     <p>A period can hold hundreds of thousands of requests, and storing every value in every report would make these files unusable. So each distribution keeps a <strong>random sample of up to 5,000 values</strong> alongside its statistics.</p>
