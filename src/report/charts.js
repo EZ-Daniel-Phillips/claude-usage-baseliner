@@ -312,6 +312,94 @@ export function timeSeriesBars(rows, { width = 860, height = 220, valueLabel = '
 }
 
 // ---------------------------------------------------------------------------
+// Day-of-week bars (7 days, same two series as the hour-of-day chart)
+// ---------------------------------------------------------------------------
+// Deliberately the same visual grammar as hourOfDayChart() - same two series, same "each scaled
+// against its own total" rule, same shaded-band-for-context device - because it answers the second
+// half of one question ("when do I work?"), and a reader who has just learned to read the hour chart
+// should not have to learn a second idiom four inches further down the page.
+//
+// Two things it does that the hour chart does not:
+//   - A dashed reference line at 100/7 = 14.3%, the share each slot would hold if work were spread
+//     evenly across the week. Without it a reader has no way to tell a real peak from the ordinary
+//     lumpiness of seven numbers that must add to 100.
+//   - Per-day averages ("events per Saturday") in the tooltips alongside the raw counts, since the
+//     weekday/weekend comparison in the prose beside the chart is built on those and a reader
+//     checking the arithmetic should find the same numbers here.
+//
+// Weekend slots get the shaded background rather than a distinct bar colour, because bar colour is
+// already carrying series identity and the weekend is context, not a third series.
+export function dayOfWeekChart(
+  days,
+  {
+    width = 980,
+    height = 260,
+    promptsLabel = 'Your prompts (what you typed)',
+    evenSharePct = 100 / 7,
+  } = {}
+) {
+  if (!days.length) return '<p class="muted">No data.</p>';
+  const padL = 46;
+  const padR = 10;
+  const padT = 16;
+  const padB = 34;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+  const max = Math.max(...days.map((d) => Math.max(d.pctClaudeWorking ?? 0, d.pctHumanPrompts ?? 0)), evenSharePct) || 1;
+  const slotW = plotW / days.length;
+  const barW = Math.max(0.6, (slotW - 14) / 2 - 3);
+  const sy = (v) => padT + plotH - (v / max) * plotH;
+
+  const weekendBands = days
+    .map((d, i) =>
+      d.weekend
+        ? `<rect x="${(padL + i * slotW).toFixed(1)}" y="${padT}" width="${slotW.toFixed(1)}" height="${plotH.toFixed(1)}" fill="var(--info-bg)"/>`
+        : ''
+    )
+    .join('');
+
+  // Per-day averages are the honest way to say "how busy is a Saturday", so they go in the tooltip
+  // when the span needed to compute them is known, and are silently omitted when it is not.
+  const perDay = (v, noun) => (v === null || v === undefined ? '' : `, ${v.toFixed(1)} ${noun} per such day`);
+
+  const bars = days
+    .map((d, i) => {
+      const xSlot = padL + i * slotW + 6;
+      const cw = d.pctClaudeWorking ?? 0;
+      const hp = d.pctHumanPrompts ?? 0;
+      const cwH = Math.max(cw > 0 ? 1.5 : 0.5, (cw / max) * plotH);
+      const hpH = Math.max(hp > 0 ? 1.5 : 0.5, (hp / max) * plotH);
+      return `<g>
+        <rect class="bar-a" x="${xSlot.toFixed(2)}" y="${sy(cw).toFixed(1)}" width="${barW.toFixed(2)}" height="${cwH.toFixed(1)}" rx="1.5"><title>${esc(d.label)} &ndash; Claude working: ${fmtCompact(d.claudeWorking)} events (${cw.toFixed(1)}% of all Claude-working events${perDay(d.claudeWorkingPerDay, 'events')})</title></rect>
+        <rect class="bar-b" x="${(xSlot + barW + 3).toFixed(2)}" y="${sy(hp).toFixed(1)}" width="${barW.toFixed(2)}" height="${hpH.toFixed(1)}" rx="1.5"><title>${esc(d.label)} &ndash; your prompts: ${(d.humanPrompts ?? 0).toLocaleString('en-US')} (${hp.toFixed(1)}% of all your prompts${perDay(d.humanPromptsPerDay, 'prompts')})</title></rect>
+        <text class="tick" x="${(padL + i * slotW + slotW / 2).toFixed(1)}" y="${padT + plotH + 16}" text-anchor="middle">${esc(d.short)}</text>
+      </g>`;
+    })
+    .join('');
+
+  const evenY = sy(evenSharePct);
+  const evenLine = `<line class="grid-dash" x1="${padL}" y1="${evenY.toFixed(1)}" x2="${padL + plotW}" y2="${evenY.toFixed(1)}"/>
+    <text class="tick" x="${padL - 6}" y="${(evenY + 3).toFixed(1)}" text-anchor="end">${evenSharePct.toFixed(1)}%</text>`;
+
+  return `<figure class="chart">
+    <svg viewBox="0 0 ${width} ${height}" role="img" width="100%" preserveAspectRatio="xMidYMid meet" aria-label="Activity by day of week, local time: Claude working versus your prompts">
+      ${weekendBands}
+      ${evenLine}
+      ${bars}
+      <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}"/>
+      <text class="axis-title" x="${padL}" y="${height - 4}">day of week (local)</text>
+    </svg>
+    <div class="legend">
+      <span class="legend-item"><span class="swatch" style="background:var(--series-1)"></span>Claude working (assistant turns + tool round-trips)</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--series-2)"></span>${esc(promptsLabel)}</span>
+      <span class="legend-item muted">Shaded columns: the weekend (Sat/Sun)</span>
+      <span class="legend-item muted">Dashed line: ${evenSharePct.toFixed(1)}% &ndash; what each day would hold if the week were spread evenly</span>
+      <span class="legend-item muted">Each series is scaled against its own total, not against each other</span>
+    </div>
+  </figure>`;
+}
+
+// ---------------------------------------------------------------------------
 // Hour-of-day bars (24 hours, two series: Claude working vs. your prompts)
 // ---------------------------------------------------------------------------
 // One chart, one pair of keys. The two series are "Claude working" (assistant turns + tool

@@ -1,4 +1,5 @@
 import { estimateCostByModel, COST_MODEL_NOTES } from './cost.js';
+import { buildGitActivity } from './gitMetrics.js';
 
 // Assembles the report-data object for --visualise from two independent, read-only sources:
 //   - rootStats: Claude Code's own stats-cache.json (survives transcript rotation, so it covers the
@@ -128,6 +129,158 @@ export function buildHourOfDay({ claudeWorking, humanPrompts, humanPromptsSource
 }
 
 // ---------------------------------------------------------------------------
+// Day-of-week shape, and the weekday/weekend split
+// ---------------------------------------------------------------------------
+// The same two event series as buildHourOfDay(), folded into 7 local-weekday slots instead of 24
+// local-hour ones. Bucketed in local time (see scan/activityScanner.js and scan/promptHistory.js for
+// why UTC would be wrong here specifically).
+//
+// The subtlety this section exists to get right: a raw weekday-vs-weekend share is close to
+// meaningless on its own, because a week contains five weekdays and two weekend days. Someone who
+// works exactly as hard on a Saturday as on a Tuesday still shows only ~28.6% of their activity at
+// the weekend, and a reader will misread that as "I barely work weekends". So the weekend figure is
+// reported two ways:
+//   - `weekendSharePct`     - the plain share of events that landed on a Sat/Sun. Honest, but has to
+//                             be read against the 28.6% an evenly-spread week would produce.
+//   - `weekendIntensityPct` - events per weekend DAY as a percentage of events per weekday DAY. This
+//                             is the figure that answers the question directly: 100% means a weekend
+//                             day looks exactly like a working day, 0% means the weekend is genuinely
+//                             off.
+// The per-day denominators are calendar-day counts over each series' own observed span, not counts of
+// *active* days - a Saturday with no activity is the signal, so dropping it would assume the answer.
+//
+// The two series have different spans (transcripts rotate at ~30 days, history.jsonl does not), so
+// each gets its own occurrence denominator rather than sharing one.
+export const DOW_LABELS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+export const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Sat/Sun. Not configurable, for the same reason BUSINESS_HOUR_START/END are not: every calendar
+// convention in this report is a fixed, documented assumption rather than a setting, and a reader on
+// a Sun-Thu week is better served by the per-day figures than by a flag nobody remembers to set.
+export function isWeekendDay(day) {
+  return day === 0 || day === 6;
+}
+
+// How many times each weekday actually occurred between two timestamps, inclusive, in local calendar
+// days. This is the denominator that turns "events on Saturdays" into "events per Saturday".
+//
+// Steps by setDate(+1) rather than adding 86_400_000ms deliberately: across a DST transition a local
+// day is 23 or 25 hours long, and fixed-millisecond stepping drifts far enough over a multi-month
+// span to miscount whole days. Returns null rather than a zero-filled array when the span is unknown
+// or implausible, so callers report "n/a" instead of dividing by zero and claiming a per-day rate
+// they cannot actually compute.
+export function weekdayOccurrences(firstTs, lastTs) {
+  if (!Number.isFinite(firstTs) || !Number.isFinite(lastTs) || lastTs < firstTs) return null;
+  const counts = new Array(7).fill(0);
+  const cur = new Date(firstTs);
+  cur.setHours(0, 0, 0, 0);
+  const end = new Date(lastTs);
+  end.setHours(0, 0, 0, 0);
+  // ~54 years of days. A corrupt far-future timestamp should degrade this one figure, not hang the run.
+  let guard = 0;
+  while (cur <= end && guard < 20000) {
+    counts[cur.getDay()] += 1;
+    cur.setDate(cur.getDate() + 1);
+    guard += 1;
+  }
+  return guard >= 20000 ? null : counts;
+}
+
+// Weekday/weekend aggregates for ONE series, given its 7 per-day counts and the calendar-day
+// occurrences of its own span. `occurrences` may be null (span unknown) - everything needing a
+// per-day denominator then comes back null rather than being faked from an assumed 5:2 ratio.
+function weekdaySplit(counts, occurrences) {
+  const total = counts.reduce((a, b) => a + b, 0);
+  const weekendTotal = counts.reduce((a, c, day) => a + (isWeekendDay(day) ? c : 0), 0);
+  const weekdayTotal = total - weekendTotal;
+  const weekendDays = occurrences ? occurrences.reduce((a, c, day) => a + (isWeekendDay(day) ? c : 0), 0) : null;
+  const weekdayDays = occurrences ? occurrences.reduce((a, c, day) => a + (isWeekendDay(day) ? 0 : c), 0) : null;
+  const weekendPerDay = weekendDays ? weekendTotal / weekendDays : null;
+  const weekdayPerDay = weekdayDays ? weekdayTotal / weekdayDays : null;
+
+  const ranked = counts.map((c, day) => ({ day, count: c })).sort((a, b) => b.count - a.count);
+  const busiest = ranked[0];
+  const quietest = ranked[ranked.length - 1];
+
+  return {
+    total,
+    weekdayTotal,
+    weekendTotal,
+    weekdaySharePct: total ? (weekdayTotal / total) * 100 : null,
+    weekendSharePct: total ? (weekendTotal / total) * 100 : null,
+    weekdayDays,
+    weekendDays,
+    weekdayPerDay,
+    weekendPerDay,
+    // The headline: a weekend day's volume as a percentage of a weekday's. 100% means no weekend at
+    // all in the behavioural sense. Null when either denominator is unknown, or when the weekday rate
+    // is zero and there is nothing to be a percentage of.
+    weekendIntensityPct: weekdayPerDay && weekendPerDay !== null ? (weekendPerDay / weekdayPerDay) * 100 : null,
+    busiestDay: busiest.day,
+    busiestDayCount: busiest.count,
+    busiestDaySharePct: total ? (busiest.count / total) * 100 : null,
+    quietestDay: quietest.day,
+    quietestDayCount: quietest.count,
+    daysWithActivity: counts.filter((c) => c > 0).length,
+  };
+}
+
+// `claudeSpan` / `promptSpan` are {firstTs, lastTs} in epoch ms for each series' own observed window -
+// transcripts still on disk for the Claude-working series, history.jsonl for the prompts series.
+// Either may be null, which costs only that series' per-day figures.
+export function buildDayOfWeek({
+  claudeWorking,
+  humanPrompts,
+  humanPromptsSource = 'transcripts',
+  claudeSpan = null,
+  promptSpan = null,
+}) {
+  const cw = Array.from({ length: 7 }, (_, d) => claudeWorking?.[d] ?? 0);
+  const hp = Array.from({ length: 7 }, (_, d) => humanPrompts?.[d] ?? 0);
+  const claudeOccurrences = claudeSpan ? weekdayOccurrences(claudeSpan.firstTs, claudeSpan.lastTs) : null;
+  const promptOccurrences = promptSpan ? weekdayOccurrences(promptSpan.firstTs, promptSpan.lastTs) : null;
+
+  const totalClaudeWorking = cw.reduce((a, b) => a + b, 0);
+  const totalHumanPrompts = hp.reduce((a, b) => a + b, 0);
+
+  const days = Array.from({ length: 7 }, (_, day) => ({
+    day,
+    label: DOW_LABELS[day],
+    short: DOW_SHORT[day],
+    weekend: isWeekendDay(day),
+    claudeWorking: cw[day],
+    humanPrompts: hp[day],
+    // Share of each series' own total, exactly as the hour-of-day chart does. Slot-against-slot is
+    // fair here without a per-day denominator, because over any span longer than a few weeks each
+    // weekday occurs an almost equal number of times - the 5-vs-2 problem only bites when the weekday
+    // and weekend BLOCKS are compared, which is what weekdaySplit() above handles.
+    pctClaudeWorking: totalClaudeWorking ? (cw[day] / totalClaudeWorking) * 100 : 0,
+    pctHumanPrompts: totalHumanPrompts ? (hp[day] / totalHumanPrompts) * 100 : 0,
+    claudeWorkingPerDay: claudeOccurrences?.[day] ? cw[day] / claudeOccurrences[day] : null,
+    humanPromptsPerDay: promptOccurrences?.[day] ? hp[day] / promptOccurrences[day] : null,
+    claudeOccurrences: claudeOccurrences?.[day] ?? null,
+    promptOccurrences: promptOccurrences?.[day] ?? null,
+  }));
+
+  return {
+    days,
+    humanPromptsSource,
+    totalClaudeWorking,
+    totalHumanPrompts,
+    // What an evenly-spread week would put in each slot. The chart draws this as a reference line so
+    // "is Wednesday actually a peak" is answerable by eye rather than by arithmetic.
+    evenSharePct: 100 / 7,
+    claude: weekdaySplit(cw, claudeOccurrences),
+    prompts: weekdaySplit(hp, promptOccurrences),
+    // Kept raw so report/mergeActivity.js can re-sum across machines without reversing percentages.
+    rawClaudeWorking: cw,
+    rawHumanPrompts: hp,
+    claudeSpan,
+    promptSpan,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Full-lifetime prompt hours (history.jsonl)
 // ---------------------------------------------------------------------------
 // Counts every prompt actually typed, by local hour, over the tool's entire history - built from
@@ -191,6 +344,10 @@ export function buildPromptHours(promptHistory) {
     // buildHourOfDay() as the chart's prompts series, and report/mergeActivity.js can re-sum across
     // machines, neither of them having to reverse-engineer counts back out of the percentages above.
     rawHours: [...promptHistory.hours],
+    // Same rationale as rawHours, for the 7-slot weekday histogram. Null on a promptHistory object
+    // built before this field existed (a --merge of an older --visualise JSON), which degrades the
+    // prompts series of the day-of-week chart rather than failing the merge.
+    rawDow: Array.isArray(promptHistory.dow) ? [...promptHistory.dow] : null,
   };
 }
 
@@ -279,7 +436,7 @@ function buildStaleness(statsCache, activityScan) {
   return { lastComputedDate, daysSinceComputed, oldestTranscriptDate, unrecoverableGapDays };
 }
 
-export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache, activityScan, promptHistory = null }) {
+export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache, activityScan, promptHistory = null, gitHarvest = null }) {
   const lastComputedDate = statsCache?.lastComputedDate ?? null;
   const cachedDaily = statsCache?.dailyActivity ?? [];
   // Only the portion of the live scan's window the cache does not already cover, so the two series
@@ -312,6 +469,33 @@ export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache
         })
       : null;
 
+  // Day-of-week uses exactly the same source preference as the hour chart above - history.jsonl for
+  // the prompts series when it is there, transcripts otherwise - so the two charts never disagree
+  // about what "your prompts" means. Each series also carries its own span, because the per-weekday
+  // averages need a denominator ("how many Saturdays were there?") and the two series cover very
+  // different stretches of time: transcripts rotate at ~30 days, history.jsonl does not rotate at all.
+  const lifetimePromptDow = promptHours ? promptHours.rawDow : null;
+  const claudeSpan =
+    activityScan.oldestTs !== null && activityScan.newestTs !== null
+      ? { firstTs: activityScan.oldestTs, lastTs: activityScan.newestTs }
+      : null;
+  const promptSpan =
+    lifetimePromptDow && promptHistory?.firstTs != null && promptHistory?.lastTs != null
+      ? { firstTs: promptHistory.firstTs, lastTs: promptHistory.lastTs }
+      : claudeSpan; // transcript-derived fallback series shares the transcript window
+  const dowClaude = activityScan.dayOfWeek?.claudeWorking ?? new Array(7).fill(0);
+  const dowPrompts = lifetimePromptDow ?? activityScan.dayOfWeek?.humanPrompts ?? new Array(7).fill(0);
+  const dayOfWeek =
+    dowClaude.reduce((a, b) => a + b, 0) + dowPrompts.reduce((a, b) => a + b, 0) > 0
+      ? buildDayOfWeek({
+          claudeWorking: dowClaude,
+          humanPrompts: dowPrompts,
+          humanPromptsSource: lifetimePromptDow ? 'history' : 'transcripts',
+          claudeSpan,
+          promptSpan,
+        })
+      : null;
+
   const tokenSummary = buildTokenSummary(statsCache, activityScan);
   const cost = tokenSummary.byModel.length ? estimateCostByModel(tokenSummary.byModel) : null;
 
@@ -337,7 +521,12 @@ export function buildActivityReportData({ claudeDir, id, generatedAt, statsCache
     },
     coverage,
     hourOfDay,
+    dayOfWeek,
     promptHours,
+    // Real git history, read from the repositories themselves rather than inferred from transcripts.
+    // Null only when --no-git was passed; an unavailable harvest still produces an object saying why,
+    // so the report can state the reason instead of silently omitting a section.
+    gitActivity: gitHarvest ? buildGitActivity(gitHarvest) : null,
     dailyActivity: cachedDaily,
     recentDailyActivity: recentDaily,
     sessions: {

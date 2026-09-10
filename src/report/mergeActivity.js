@@ -1,5 +1,6 @@
 import { estimateCostByModel, COST_MODEL_NOTES } from './cost.js';
-import { buildCoverage, buildHourOfDay, buildPromptHours } from './activityMetrics.js';
+import { buildCoverage, buildHourOfDay, buildDayOfWeek, buildPromptHours } from './activityMetrics.js';
+import { mergeGitActivity } from './gitMetrics.js';
 
 // Combines two or more --visualise report-data objects (the JSON --visualise writes) into one, so
 // activity from separate machines - each with its own ~/.claude, its own stats-cache.json, its own
@@ -108,6 +109,56 @@ function mergeHourOfDay(list) {
   return buildHourOfDay({ claudeWorking, humanPrompts, humanPromptsSource });
 }
 
+// Same rule as mergeHourOfDay(), for the 7-slot weekday histograms: sum the raw per-day counts, then
+// rebuild every derived share through the same builder --visualise uses.
+//
+// The per-day denominators ("how many Saturdays?") are recomputed from the UNION of the sources'
+// spans, not summed from their per-source occurrence counts. Summing would double-count every
+// calendar day two machines were both active on, inflating the denominator and understating how hard
+// weekends are worked - the same overlapping-dates hazard mergeDailyActivity() handles by keying on
+// date. Two caveats a reader should know and the method section states: machines in different
+// timezones bucket their own events locally before merging (already true of the hour chart), and a
+// union span credits a machine with calendar days it may not have existed for, which makes merged
+// per-day rates a floor rather than an exact figure.
+function mergeDayOfWeek(list) {
+  const withDow = list.filter((rd) => rd.dayOfWeek);
+  if (!withDow.length) return null;
+  const claudeWorking = new Array(7).fill(0);
+  const humanPrompts = new Array(7).fill(0);
+  let claudeFirst = null;
+  let claudeLast = null;
+  let promptFirst = null;
+  let promptLast = null;
+
+  const widen = (span, first, last) => {
+    if (!span) return [first, last];
+    if (Number.isFinite(span.firstTs) && (first === null || span.firstTs < first)) first = span.firstTs;
+    if (Number.isFinite(span.lastTs) && (last === null || span.lastTs > last)) last = span.lastTs;
+    return [first, last];
+  };
+
+  for (const rd of withDow) {
+    for (const d of rd.dayOfWeek?.days ?? []) {
+      claudeWorking[d.day] += d.claudeWorking ?? 0;
+      humanPrompts[d.day] += d.humanPrompts ?? 0;
+    }
+    [claudeFirst, claudeLast] = widen(rd.dayOfWeek?.claudeSpan, claudeFirst, claudeLast);
+    [promptFirst, promptLast] = widen(rd.dayOfWeek?.promptSpan, promptFirst, promptLast);
+  }
+
+  // Same weaker-claim-wins rule as mergeHourOfDay(): one machine without history.jsonl makes the
+  // combined prompts series a mixture, and 'transcripts' is then the true label for it.
+  const humanPromptsSource = withDow.every((rd) => rd.dayOfWeek?.humanPromptsSource === 'history') ? 'history' : 'transcripts';
+
+  return buildDayOfWeek({
+    claudeWorking,
+    humanPrompts,
+    humanPromptsSource,
+    claudeSpan: claudeFirst !== null && claudeLast !== null ? { firstTs: claudeFirst, lastTs: claudeLast } : null,
+    promptSpan: promptFirst !== null && promptLast !== null ? { firstTs: promptFirst, lastTs: promptLast } : null,
+  });
+}
+
 // Full-lifetime typed-prompt hours. Summed per hour across machines before percentages/shares are
 // recomputed, exactly as mergeHourOfDay() does - each machine has its own history.jsonl covering its
 // own keystrokes, so nothing here can double-count. The span becomes the union of the sources' spans
@@ -118,6 +169,8 @@ function mergePromptHours(list) {
   if (!withPromptHours.length) return null;
 
   const hours = new Array(24).fill(0);
+  const dow = new Array(7).fill(0);
+  let anyDow = false;
   const monthly = new Map();
   let firstTs = null;
   let lastTs = null;
@@ -128,6 +181,12 @@ function mergePromptHours(list) {
   for (const rd of withPromptHours) {
     const ph = rd.promptHours;
     for (const entry of ph.hours ?? []) hours[entry.hour] += entry.prompts ?? 0;
+    // Absent on --visualise JSON written before the day-of-week work landed; such a source still
+    // merges, it just contributes nothing to the weekday histogram rather than zeroing it.
+    if (Array.isArray(ph.rawDow)) {
+      anyDow = true;
+      for (let d = 0; d < 7; d += 1) dow[d] += ph.rawDow[d] ?? 0;
+    }
     for (const m of ph.monthly ?? []) monthly.set(m.month, (monthly.get(m.month) ?? 0) + (m.prompts ?? 0));
     const first = ph.firstPromptAt ? Date.parse(ph.firstPromptAt) : NaN;
     const last = ph.lastPromptAt ? Date.parse(ph.lastPromptAt) : NaN;
@@ -145,6 +204,7 @@ function mergePromptHours(list) {
   // shape and every derived share is recomputed from combined counts rather than averaged.
   return buildPromptHours({
     hours,
+    dow: anyDow ? dow : undefined,
     firstTs,
     lastTs,
     slashCommands,
@@ -242,6 +302,11 @@ export function mergeActivityReportData(reportDataList, { id, generatedAt } = {}
     },
     coverage: activeDates.length ? buildCoverage(activeDates) : null,
     hourOfDay: mergeHourOfDay(valid),
+    dayOfWeek: mergeDayOfWeek(valid),
+    // Combined by repository identity (root-commit hash), not by path or by summing - two machines
+    // holding clones of the same repo see the same commits, so summing would double them. See
+    // report/gitMetrics.js.
+    gitActivity: mergeGitActivity(valid),
     promptHours: mergePromptHours(valid),
     dailyActivity,
     recentDailyActivity,

@@ -901,6 +901,9 @@ export const STYLE = `
   .chart { margin: 1.25rem 0; padding: 0; overflow-x: auto; }
   .chart svg { display: block; min-width: 460px; }
   .grid { stroke: var(--grid); stroke-width: 1; }
+  /* Reference lines that mean "here is the neutral/expected value", not "here is a gridline" - dashed
+     so they read as annotation rather than as chart furniture even at TV-presentation sizes. */
+  .grid-dash { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 5 4; opacity: 0.75; }
   .axis { stroke: var(--border); stroke-width: 1; }
   .tick, .axis-title, .row-label, .bar-val, .seg-label, .median-label, .wf-val {
     font-family: -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--muted); font-size: 11px; }
@@ -1027,6 +1030,7 @@ export const TV_STYLE = `
   .swatch { width: 15px; height: 15px; border-radius: 4px; }
   figcaption { font-size: 1rem; max-width: none; }
   .grid { stroke-width: 1.4; }
+  .grid-dash { stroke-width: 1.6; }
   .axis { stroke-width: 1.6; }
 
   details > summary { font-size: 1.05rem; }
