@@ -80,7 +80,7 @@ export async function runVisualise({ claudeDir, maxCacheAgeDays = 2, allowStaleC
   let gitHarvest = null;
   if (harvestGit) {
     info(`Harvesting real git history from the repositories seen in transcripts (read-only) ...`);
-    gitHarvest = harvestGitActivity({ cwds: activityScan.cwds ?? [], extraRepos });
+    gitHarvest = await harvestGitActivity({ cwds: activityScan.cwds ?? [], extraRepos });
     if (!gitHarvest.available) {
       warn(`Git harvest unavailable: ${gitHarvest.reason}. The report will say so rather than estimating.`);
     }

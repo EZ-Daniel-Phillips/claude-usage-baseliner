@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { readLinesFrom } from './jsonlReader.js';
+import { readLines } from './jsonlReader.js';
 import { verbose } from '../util/log.js';
 
 // Reads ~/.claude/history.jsonl - Claude Code's own log of every prompt you have actually typed into
@@ -74,7 +74,7 @@ export async function readPromptHistory(claudeDir) {
   let lastTs = null;
 
   try {
-    for await (const { line } of readLinesFrom(filePath, 0)) {
+    for await (const line of readLines(filePath)) {
       let obj;
       try {
         obj = JSON.parse(line);

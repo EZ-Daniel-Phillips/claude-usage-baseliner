@@ -10,7 +10,7 @@
 // changes rather than your own efficiency. Bump PRICE_TABLE_VERSION when you change a rate, and
 // re-baseline afterwards.
 
-export const PRICE_TABLE_VERSION = '2026-06-24';
+export const PRICE_TABLE_VERSION = '2026-09-10';
 
 // USD per 1,000,000 tokens, published Claude API list rates.
 // Cache multipliers are relative to the model's own input rate.
@@ -23,19 +23,34 @@ const CACHE_READ_MULTIPLIER = 0.1;
 // an unverifiable number into the headline, whereas this understates by a known, disclosable amount.
 const CACHE_WRITE_FALLBACK_MULTIPLIER = CACHE_WRITE_5M_MULTIPLIER;
 
+// `cacheRead` overrides CACHE_READ_MULTIPLIER for models that do not use the standard 0.1x. Only
+// Fable 5.1 and Mythos 5.1 differ today, at 0.025x - a 4x difference on the token class that
+// dominates every count in this corpus, so treating it as 0.1x would materially overstate their cost.
 const PRICES = {
+  'claude-fable-5-1': { input: 10, output: 50, cacheRead: 0.025 },
+  'claude-mythos-5-1': { input: 10, output: 50, cacheRead: 0.025 },
   'claude-fable-5': { input: 10, output: 50 },
   'claude-mythos-5': { input: 10, output: 50 },
   'claude-opus-5': { input: 5, output: 25 },
   'claude-opus-4-8': { input: 5, output: 25 },
   'claude-opus-4-7': { input: 5, output: 25 },
   'claude-opus-4-6': { input: 5, output: 25 },
-  // Sonnet 5 carries a promotional $2/$10 rate through 2026-08-31. We deliberately price at the
-  // standard rate: a price that changes partway through the measurement period would show up as a
-  // fake efficiency gain (or loss) on the day the promo ends.
-  'claude-sonnet-5': { input: 3, output: 15 },
+  'claude-opus-4-5': { input: 5, output: 25 },
+  // Sonnet 5 launched at a promotional $2/$10 through 2026-08-31, and an earlier version of this
+  // table priced it at the $3/$15 it was scheduled to rise to, precisely so a mid-window price change
+  // could not masquerade as an efficiency gain. Anthropic has since cancelled that increase and made
+  // $2/$10 the standard price, so the scheduled-rate hedge is no longer the right call - $2/$10 is
+  // simply what this model costs.
+  'claude-sonnet-5': { input: 2, output: 10 },
   'claude-sonnet-4-6': { input: 3, output: 15 },
+  'claude-sonnet-4-5': { input: 3, output: 15 },
   'claude-haiku-4-5': { input: 1, output: 5 },
+  // Retired on the first-party API but still reachable on partner platforms, and still present in
+  // older transcripts on disk - priced so a historical corpus does not silently fall back.
+  'claude-opus-4-1': { input: 15, output: 75 },
+  'claude-opus-4': { input: 15, output: 75 },
+  'claude-sonnet-4': { input: 3, output: 15 },
+  'claude-haiku-3-5': { input: 0.8, output: 4 },
 };
 
 // Unknown/unmapped models are priced at the Opus tier so a costing gap shows up as an over-estimate
@@ -52,6 +67,13 @@ function normalizeModelId(model) {
 export function priceFor(model) {
   const key = normalizeModelId(model);
   return PRICES[key] ?? null;
+}
+
+// The cache-read multiplier that applies to this model, which is NOT a global constant: Fable 5.1 and
+// Mythos 5.1 read cache at 0.025x rather than 0.1x. Unknown models take the standard rate, matching
+// the Opus-tier fallback price.
+export function cacheReadMultiplierFor(model) {
+  return priceFor(model)?.cacheRead ?? CACHE_READ_MULTIPLIER;
 }
 
 export function isPricedModel(model) {
@@ -95,7 +117,7 @@ export function estimateCost(model, tokens, { ttlMode = 'exact' } = {}) {
     tokens.inputTokens * inRate +
     tokens.outputTokens * outRate +
     cacheWriteCost +
-    tokens.cacheReadTokens * inRate * CACHE_READ_MULTIPLIER
+    tokens.cacheReadTokens * inRate * (price.cacheRead ?? CACHE_READ_MULTIPLIER)
   );
 }
 
@@ -111,11 +133,23 @@ export function estimateCostByModel(byModel, { ttlMode = 'exact' } = {}) {
 
   let total = 0;
   let unpricedRequests = 0;
+  // Requests alone under-reports the problem: rows sourced from Claude Code's own token cache carry
+  // no request count, so a model missing from the price table could contribute billions of tokens and
+  // still report "0 unpriced requests". Tokens and estimated cost are tracked alongside it so the
+  // report can disclose the real size of any costing gap.
+  let unpricedTokens = 0;
+  let unpricedCost = 0;
+  const unpricedModels = [];
   const perModel = [];
   for (const row of byModel) {
     const cost = estimateCost(row.key, row.tokens, { ttlMode: effectiveTtlMode });
     const priced = isPricedModel(row.key);
-    if (!priced) unpricedRequests += row.requests;
+    if (!priced) {
+      unpricedRequests += row.requests ?? 0;
+      unpricedTokens += row.tokens?.total ?? 0;
+      unpricedCost += cost;
+      unpricedModels.push(row.key);
+    }
     total += cost;
     perModel.push({
       model: row.key,
@@ -128,7 +162,16 @@ export function estimateCostByModel(byModel, { ttlMode = 'exact' } = {}) {
     });
   }
   perModel.sort((a, b) => b.cost - a.cost);
-  return { total, perModel, unpricedRequests, ttlMode: effectiveTtlMode, ttlSplitAvailable: splitAvailable };
+  return {
+    total,
+    perModel,
+    unpricedRequests,
+    unpricedTokens,
+    unpricedCost,
+    unpricedModels,
+    ttlMode: effectiveTtlMode,
+    ttlSplitAvailable: splitAvailable,
+  };
 }
 
 // "Context tokens" = everything Claude had to re-read to answer, regardless of how it was billed.
@@ -171,5 +214,10 @@ export const COST_MODEL_NOTES = {
   cacheWrite1hMultiplier: CACHE_WRITE_1H_MULTIPLIER,
   cacheWriteFallbackMultiplier: CACHE_WRITE_FALLBACK_MULTIPLIER,
   cacheReadMultiplier: CACHE_READ_MULTIPLIER,
+  // Models whose cache-read rate is not the standard multiplier, so the report can say so rather than
+  // printing one global figure that is wrong for some of the spend it covers.
+  cacheReadMultiplierExceptions: Object.entries(PRICES)
+    .filter(([, v]) => typeof v.cacheRead === 'number')
+    .map(([model, v]) => ({ model, cacheReadMultiplier: v.cacheRead })),
   priceTableVersion: PRICE_TABLE_VERSION,
 };
